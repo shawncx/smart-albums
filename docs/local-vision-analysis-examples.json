@@ -1,0 +1,121 @@
+{
+  "example_only": true,
+  "note": "设计示例，未运行模型。EXAMPLE 字符串不是实际 ID 或有效哈希；未知计数为 null。模型只返回 analysis_record.data。",
+  "model_artifact": {
+    "artifact_id": "EXAMPLE_CONTENT_DERIVED_ARTIFACT_ID",
+    "manifest": {
+      "manifest_version": "model-artifact-v1",
+      "kind": "vision-language",
+      "upstream_model": "Qwen/Qwen3.5-2B",
+      "upstream_revision": null,
+      "distribution": "Ollama library",
+      "tag_at_install": "qwen3.5:2b",
+      "full_digest": "EXAMPLE_CAPTURE_ACTUAL_FULL_DIGEST_AT_SETUP",
+      "format": "gguf",
+      "quantization": "Q8_0",
+      "size_bytes": null,
+      "manifest_digest": "EXAMPLE_INCLUDE_ALL_RUNTIME_MANIFEST_LAYERS",
+      "license": "Apache-2.0"
+    }
+  },
+  "analysis_record": {
+    "analysis_id": "EXAMPLE_ANALYSIS_LOCAL_2B",
+    "photo_id": "EXAMPLE_PHOTO_P1",
+    "content_version": "EXAMPLE_INDEXED_CONTENT_VERSION",
+    "input_image_hash": "EXAMPLE_STORED_PREVIEW_SHA256",
+    "thumbnail_profile": "EXAMPLE_EXISTING_THUMBNAIL_PROFILE",
+    "cache_key": "EXAMPLE_PHOTO_AND_PROFILE_FINGERPRINT",
+    "analysis_config_id": "EXAMPLE_PROFILE_FINGERPRINT",
+    "analysis_profile": {
+      "provider": "ollama-local",
+      "model": "qwen3.5:2b",
+      "artifact_id": "EXAMPLE_CONTENT_DERIVED_ARTIFACT_ID",
+      "language": "zh-CN",
+      "schema_version": "photo-analysis-v1",
+      "schema_hash": "EXAMPLE_SCHEMA_SHA256",
+      "prompt_version": "photo-observation-v1",
+      "prompt_hash": "EXAMPLE_PROMPT_SHA256",
+      "input_scope": "indexed_preview",
+      "preprocess_profile": "stored-jpeg-unchanged-v1",
+      "runtime": {
+        "name": "ollama",
+        "version": "0.33.3",
+        "binary_sha256": "EXAMPLE_ACTUAL_BINARY_HASH",
+        "backend": "cpu"
+      },
+      "generation": {
+        "think": false,
+        "temperature": 0,
+        "num_ctx": 8192,
+        "num_predict": 1600
+      }
+    },
+    "model": "qwen3.5:2b",
+    "model_source": "local_runtime",
+    "response_id": null,
+    "usage_scope": "local_runtime_request",
+    "usage": null,
+    "model_elapsed_seconds": null,
+    "execution_metrics": {
+      "queue_seconds": null,
+      "load_seconds": null,
+      "prompt_eval_seconds": null,
+      "generation_seconds": null,
+      "validation_seconds": null,
+      "persistence_seconds": null,
+      "end_to_end_seconds": null,
+      "peak_runtime_rss_bytes": null,
+      "minimum_system_available_bytes": null,
+      "metric_status": "example_not_measured"
+    },
+    "created_at": "2026-09-06T00:00:00Z",
+    "data": {
+      "subjects": ["树木", "交错的枝条"],
+      "scene": "室外，树木轮廓前方没有明显遮挡，背景较简洁。",
+      "composition": ["树干位于画面中部", "枝条向两侧伸展形成线条关系"],
+      "color": ["黑白影调", "暗色树木与浅灰背景形成对比"],
+      "lighting": ["整体光线较柔和", "背景比树木轮廓明亮"],
+      "mood": ["安静", "简洁"],
+      "technical_observations": {
+        "visible_issues": [],
+        "assessment_scope": "preview",
+        "limitations": ["仅观察缩放后的 JPEG 预览，无法据此判断原图的精细锐度和噪点。"]
+      },
+      "visual_description": "一幅黑白树木照片。暗色树干与交错枝条分布在浅灰背景前，画面主要依靠线条和明暗对比组织。",
+      "tags": ["黑白", "树木", "枝条", "线条"]
+    }
+  },
+  "selection": {
+    "photo_id": "EXAMPLE_PHOTO_P1",
+    "analysis_id": "EXAMPLE_ANALYSIS_LOCAL_2B",
+    "selection_reason": "first_valid_result_under_confirmed_fill_missing_plan",
+    "selected_at": "2026-09-06T00:00:00Z"
+  },
+  "embedding_document": {
+    "document_id": "EXAMPLE_DOCUMENT_ID",
+    "analysis_id": "EXAMPLE_ANALYSIS_LOCAL_2B",
+    "encoder_id": "EXAMPLE_E5_PROFILE_WITH_PHOTO_TEXT_V2",
+    "recipe_version": "photo-text-v2",
+    "text_hash": "EXAMPLE_RETRIEVAL_BODY_SHA256",
+    "retrieval_text": "描述：黑白树木照片，枝条交错，浅灰背景较简洁。\n主体：树木；枝条\n场景：室外\n构图：树干居中；枝条向两侧延展\n色彩：黑白；暗色轮廓与浅灰背景\n光线：柔和；背景较亮\n氛围：安静\n标签：线条",
+    "token_count": null,
+    "trimming": {
+      "status": "illustrative_not_produced_by_recipe",
+      "target_tokens_including_prefix_and_special": 480,
+      "trimmed_fields": [],
+      "omitted_fields": ["technical_observations"]
+    }
+  },
+  "embedding_row_description": {
+    "photo_id": "EXAMPLE_PHOTO_P1",
+    "analysis_id": "EXAMPLE_ANALYSIS_LOCAL_2B",
+    "encoder_id": "EXAMPLE_E5_PROFILE_WITH_PHOTO_TEXT_V2",
+    "dimensions": 384,
+    "dtype": "float32-le",
+    "normalized": 1,
+    "vector_storage": "SQLite BLOB, 1536 bytes; no real vector has been generated for this example",
+    "vector_hash": null,
+    "token_count": null,
+    "truncated": null
+  }
+}

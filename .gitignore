@@ -17,4 +17,8 @@ artifacts/
 *.pem
 *.key
 # Local development plans and verification reports reference private runtime data.
-/docs/
+/docs/*
+!/docs/TODO.md
+!/docs/local-vision-analysis-plan.md
+!/docs/local-vision-analysis-examples.json
+!/docs/local-vision-schema-v6.sql

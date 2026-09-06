@@ -71,6 +71,8 @@ python photography/scripts/photography.py --state-dir <state-directory> search-a
 
 ## References and tests
 
+The proposed local visual analysis extension is documented in the [detailed implementation plan](docs/local-vision-analysis-plan.md), with [SQLite schema](docs/local-vision-schema-v6.sql) and [record examples](docs/local-vision-analysis-examples.json). This is a design proposal, not an implemented local vision provider. See the [project roadmap](docs/TODO.md) for current priorities.
+
 - [Ingestion](photography/references/ingest.md)
 - [Albums](photography/references/albums.md)
 - [Visual analysis](photography/references/analyze.md)

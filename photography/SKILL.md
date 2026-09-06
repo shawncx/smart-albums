@@ -98,6 +98,17 @@ Read [management](references/management.md). Use `management open`, `management 
 - Plain browse/search neither stats originals nor writes the database, repairs paths or performs DDL. Distinguish stored `original_status` from `ingest_state` and report original verification as not checked.
 - `--html` and `--output` export read-only `album-snapshot-v1` snapshots. Outputs must not overwrite the album, sidecars, model cache or recorded originals. JPEG preview exports must also stay outside saved scan source directories. There are no selection checkboxes, album-write controls or live backend.
 
+### Default semantic display: embedding-only selection
+
+**Do not pass image or thumbnail data to the agent.** All relevance/display decisions must use embedding-derived similarity information only: the query, `score`, `candidate_rank`, `score_gap_from_best` and `score_gap_to_next`. IDs and input hashes identify records; do not infer relevance from filenames, EXIF, original files, screenshots, OCR or image tools. Do not decode raw vector components as if they described visible objects.
+
+1. Retrieve candidates with `management search "<query>" --mode semantic --output <candidates.json>`. Do not create/open a candidate HTML page for agent inspection. Semantic JSON contains numeric similarity evidence and record identities, not photos, previews or photo metadata.
+2. Choose which IDs are useful to display from the similarity evidence. Do not automatically return every candidate just because the album is small, and do not fill a quota with weak results. A smaller selection or no selection is valid. Scores/gaps are not calibrated probabilities: make conservative, clearly heuristic decisions, not claims of visual verification. If all candidates genuinely seem suitable under this evidence, all may be selected.
+3. Write a JSON array of selected candidate photo IDs; use `[]` when none is suitable. Call `management show-results <candidates.json> --ids-file <selected.json> --html <results.html>` (optionally `--output <displayed.json>`). This preserves original scores/ranks, validates album/input identities and does not repeat the query, run an image model or modify the database.
+4. Give the user the selected-result report link or a textual selection summary. The local renderer may read SQLite thumbnails to produce a page **for the user**, but do not read its HTML image payloads, open it in an agent browser/screenshot tool, or attach its images back to the agent. Raw candidate reports are optional diagnostics, not the default display.
+
+Keep the original candidate snapshot and selection file unchanged. If a chosen candidate has changed since retrieval, report `SEARCH_SNAPSHOT_STALE` and obtain a fresh search instead of inspecting a different image version. Distinguish the returned candidate count from the whole album's indexed coverage: reviewing top-K is not proof of finding every match. With no valid index/candidates, explain missing coverage rather than claiming no relevant photos exist. Never describe embedding-only selection as looking at the photos or detecting people reliably.
+
 ### Explicit original-path maintenance
 
 `management original <photo-id>` locates an original and may persist path/status repair; it is not ordinary browsing. `management relink <photo-id> --path <absolute-file>` is an explicitly requested content-verified rebinding. Keep these authorizations separate from file selection or search.

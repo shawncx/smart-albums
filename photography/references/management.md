@@ -25,6 +25,7 @@ management backup --output <new-backup.sqlite>
 management thumbnail <photo-id> --output <output-directory>\preview.jpg
 management scan <scan-id>
 management scan-events <scan-id> [--limit N] [--after <event-id>] [--changes-only]
+management show-results <candidates.json> --ids-file <selected.json> [--html <results.html>] [--output <displayed.json>]
 ```
 
 Only the view commands **create/open/photos/photo/search** also accept:
@@ -34,6 +35,8 @@ Only the view commands **create/open/photos/photo/search** also accept:
 - `--html <output-directory>\snapshot.html` for a standalone read-only HTML view.
 
 CLI JSON is returned without `--output`. Export paths use `html_output` and `output` in the result. HTML does not automatically create a companion JSON file; pass both options if needed. Backup/thumbnail use their own required `--output`, not the view options.
+
+`show-results` uses the profile captured by its input snapshot; it does not accept a profile override or perform a new search. It accepts only its listed export options and an explicit ID-array file, including an empty array.
 
 There is no `--target`, internal album/library scope, `--model-dir`, `--state-dir`, default database or old command alias.
 
@@ -84,7 +87,22 @@ With no eligible candidates, search returns empty results and coverage without l
 
 Semantic search defaults to top 10, accepts 1–1000 and **rejects `--after`**. Results sort by descending similarity, then photo ID. Coverage includes the **entire album**, not only top-K: distinguish `ready`, `missing`, `stale`, `invalid_input` and `invalid_vector` from old task failures and source availability. Incomplete coverage must not be described as searching every photo.
 
+Semantic result rows deliberately omit photo metadata, filenames, paths and thumbnail payloads. They carry record/input identities plus `score`, `candidate_rank`, `score_gap_from_best` and `score_gap_to_next`. The latter is the gap to the next ranked valid candidate, which may be outside the returned top-K; `null` means there is no next ranked candidate. These are embedding-derived numbers, not object labels or probabilities. `display_stage: candidates` marks the raw retrieval output and `selection_evidence: embedding_similarity_only` describes the selection policy.
+
 Scores are relative similarities, not probabilities, guaranteed logical filters, detection counts or technical measurements. Highest-ranked need not be relevant. Do not promise calibrated thresholds, exact negation/count behavior or focus/blur analysis.
+
+### Select what to display without sending images to the agent
+
+The Skill uses only the query and embedding-derived scores/ranks/gaps to select display IDs. It must not inspect originals, thumbnails, screenshots or image-containing HTML. No images are passed to the agent for relevance decisions. This is intentionally heuristic and may omit relevant photos or include false positives.
+
+```text
+management search "有人物的照片" --mode semantic --output <candidates.json>
+management show-results <candidates.json> --ids-file <selected.json> --html <results.html> --output <displayed.json>
+```
+
+`selected.json` is an array of photo IDs from that exact snapshot. Unknown IDs, malformed candidates, another album or stale selected input/result identities are errors. Duplicates are deduplicated; original candidate order and scores are retained. The output records the source snapshot ID and selected/candidate counts. It does not forward arbitrary input fields or image payloads, write the database, or call an encoder. Its selection method is `explicit_candidate_ids`, not an automatic classifier.
+
+An empty selection produces an empty report scoped to the retrieved candidates. It does not prove no match exists among photos outside top-K or without indexes. Selected JSON remains numeric/identity-only. Local HTML rendering can read matching SQLite previews and names **for the user's display**; the agent must return the file link without reading/attaching those images. Raw `search --html` remains an explicitly labeled, unfiltered diagnostic, not the default Skill flow. Input candidate/selection files cannot be overwritten by the selected-result export.
 
 ## Explicit original lookup and relink
 

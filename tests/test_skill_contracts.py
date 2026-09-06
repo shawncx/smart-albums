@@ -80,5 +80,15 @@ class SkillContractTests(unittest.TestCase):
         self.assertNotIn("planned but not implemented", section)
         self.assertNotIn("otherwise `PHOTOGRAPHY_STATE_DIR`", text)
 
+    def test_semantic_display_decisions_never_send_images_to_agent(self):
+        text = (ROOT / "photography" / "SKILL.md").read_text(encoding="utf-8")
+        section = text.split("### Default semantic display: embedding-only selection", 1)[1].split(
+            "### Explicit original-path maintenance", 1)[0]
+        for phrase in ("Do not pass image or thumbnail data to the agent",
+                       "embedding-derived similarity information only",
+                       "management show-results", "use `[]`", "not claims of visual verification",
+                       "do not read its HTML image payloads"):
+            self.assertIn(phrase, section)
+
 if __name__ == "__main__":
     unittest.main()

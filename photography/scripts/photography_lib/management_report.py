@@ -5,11 +5,11 @@ import base64
 import hashlib
 import html
 import json
-from uuid import UUID
 
 from .config import PhotographyError
 from .exports import export_path
-from .management import SCHEMA
+from .management import validate_snapshot_album
+from .source_paths import photo_filename
 
 
 def _text(value):
@@ -44,29 +44,26 @@ def _preview(item, store):
 
 def management_report(snapshot, output, *, config, store):
     target = export_path(output, config, store, (".html",))
-    if (not isinstance(snapshot, dict) or snapshot.get("schema") != SCHEMA
-            or snapshot.get("mode") not in ("metadata", "semantic")):
-        raise PhotographyError("INVALID_ARGUMENT", "Expected an album-snapshot-v1 snapshot.")
-    album = snapshot.get("album")
-    try:
-        snapshot_album_id = UUID(album["id"])
-    except (TypeError, ValueError, KeyError, AttributeError) as exc:
-        raise PhotographyError("INVALID_ARGUMENT", "The snapshot must identify its album UUID.") from exc
-    semantic = snapshot["mode"] == "semantic"
-    items = snapshot.get("results" if semantic else "items")
-    if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
-        raise PhotographyError("INVALID_ARGUMENT", "Snapshot items must be a list of records.")
     cards = []
     with store.read_snapshot():
-        current_album = store.album()
-        if UUID(current_album["id"]) != snapshot_album_id:
-            raise PhotographyError("ALBUM_MISMATCH", "This snapshot belongs to a different album; no previews were read.",
-                                   details={"snapshot_album": album, "album": current_album})
+        validate_snapshot_album(snapshot, store)
+        album = snapshot["album"]
+        semantic = snapshot["mode"] == "semantic"
+        selected = semantic and snapshot.get("display_stage") == "selected"
+        items = snapshot.get("results" if semantic else "items")
+        if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+            raise PhotographyError("INVALID_ARGUMENT", "Snapshot items must be a list of records.")
         for rank, item in enumerate(items, 1):
             image = _preview(item, store)
             title = (item.get("original_relative_path") or item.get("original_absolute_path")
-                     or item.get("filename") or item.get("photo_id", "照片"))
-            score = '<p class="score">排名 ' + str(rank) + " · 余弦相似度 " + _text(item.get("score")) + "</p>" if semantic else ""
+                     or item.get("filename"))
+            if not title:
+                try:
+                    title = photo_filename(store.photo(item["photo_id"]))
+                except (PhotographyError, KeyError) as exc:
+                    title = str(item.get("photo_id", "照片")) + " · " + str(exc)
+            rank_label = "原候选排名 " + _text(item.get("candidate_rank", rank)) if selected else "候选排名 " + str(rank)
+            score = '<p class="score">' + rank_label + " · 余弦相似度 " + _text(item.get("score")) + "</p>" if semantic else ""
             cards.append("<article>" + image + '<div class="body"><h2>' + _text(title) + "</h2>" + score
                          + "<details><summary>已保存的元数据与图片语义向量状态</summary><pre>" + _json(item)
                          + "</pre></details></div></article>")
@@ -78,6 +75,14 @@ def management_report(snapshot, output, *, config, store):
         header += "<p>查询：" + _text(snapshot["query"]) + "</p>"
     header += "<p>只读历史快照 · " + _text(snapshot.get("created_at", "")) + "</p>"
     header += "<p>图片语义向量配置（image_embedding）：" + _text(snapshot.get("embedding_configuration")) + "</p>"
+    if semantic:
+        if selected:
+            selection = snapshot.get("selection", {})
+            header += ("<h2>筛选后展示</h2><p>从 " + _text(selection.get("candidate_count")) + " 张候选中选择展示 "
+                       + str(len(items)) + " 张。选择依据 embedding 相似度信息，不是看图核对或目标检测；仅覆盖本次取回的候选。</p>")
+            header += "<p>原检索快照：" + _text(snapshot.get("source_search", {}).get("snapshot_id")) + "</p>"
+        else:
+            header += "<h2>原始检索候选：尚未筛选</h2><p>这是按相似度排序的候选列表，不表示所有照片都符合查询。默认先由 agent 根据分数和排序筛选；图片只在本地报告中展示给用户，不传给 agent。</p>"
     header += ("<p>元数据、排名和覆盖率均为历史记录，不是实时视图；本次未检查原图。"
                "生成报告时会校验已保存预览的内容版本和哈希，不会替换为已变化的预览。"
                "余弦相似度不是概率。图片语义向量可用不代表已完成对焦或模糊等技术检查。"
@@ -97,7 +102,8 @@ img{width:100%;height:280px;object-fit:contain;background:#e6e9e2}.body{padding:
 pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.preview-error{padding:20px;color:#8a3b20}
 .score{color:#406b67}details{margin-top:16px}
 </style></head><body>"""
-    page += header + "<main>" + ("".join(cards) or "<p>此快照没有照片结果。</p>") + "</main>"
+    empty = "<p>本次候选中未找到适合展示的照片；这不代表未取回的照片都不匹配。</p>" if selected and snapshot.get("selection", {}).get("candidate_count", 0) else "<p>此快照没有照片结果；请结合索引覆盖率判断是否需要建立索引。</p>"
+    page += header + "<main>" + ("".join(cards) or empty) + "</main>"
     page += "<footer><details><summary>完整 JSON 快照</summary><pre>" + _json(snapshot)
     page += "</pre></details></footer></body></html>"
     target.parent.mkdir(parents=True, exist_ok=True)

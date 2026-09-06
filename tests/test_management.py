@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import shutil
+import sqlite3
 import sys
 import unittest
 from unittest.mock import patch
@@ -264,6 +265,8 @@ class ManagementTests(unittest.TestCase):
         self.assertEqual(result["model_calls"], 1)
         self.assertEqual(result["image_model_calls"], 0)
         self.assertEqual(result["component"], "image_embedding")
+        self.assertEqual(result["display_stage"], "candidates")
+        self.assertEqual(result["selection_evidence"], "embedding_similarity_only")
         self.assertEqual([p["photo_id"] for p in result["results"]], self.ids[:4])
         self.assertEqual([p["result_id"] for p in result["results"][:2]], [first_id, second_id])
         self.assertEqual([p["score"] for p in result["results"][:2]], [1.0, 1.0])
@@ -274,6 +277,119 @@ class ManagementTests(unittest.TestCase):
             self.assertEqual(item["input_image_hash"], self.store.thumbnail(item["photo_id"], include_data=False)["image_hash"])
             self.assertNotIn("vector", item)
             self.assertNotIn("description", item)
+            for key in ("thumbnail", "metadata", "original_absolute_path", "original_relative_path", "filename", "image"):
+                self.assertNotIn(key, item)
+        self.assertEqual([item["candidate_rank"] for item in result["results"]], [1, 2, 3, 4])
+        self.assertAlmostEqual(result["results"][2]["score_gap_from_best"], .4, places=6)
+        self.assertIsNone(result["results"][-1]["score_gap_to_next"])
+
+    def test_show_results_is_numeric_only_preserves_ranking_and_does_not_search(self):
+        self.configure()
+        for pid, vector in zip(self.ids[:3], ((1., 0., 0.), (.6, .8, 0.), (-1., 0., 0.))):
+            self.seed(pid, vector)
+        snapshot = self.search()
+        snapshot["image_payload"] = "DO_NOT_FORWARD_THIS_IMAGE"
+        snapshot["results"][0]["thumbnail"] = {"data": "DO_NOT_FORWARD_THIS_IMAGE"}
+        before = deepcopy(snapshot)
+        database_before = self.config.database_path.read_bytes()
+        def deny_preview(action, table, column, *_):
+            if action == sqlite3.SQLITE_READ and table == "thumbnails" and column == "data":
+                return sqlite3.SQLITE_DENY
+            return sqlite3.SQLITE_OK
+        self.store.db.set_authorizer(deny_preview)
+        try:
+            with patch.object(management, "semantic_search", side_effect=AssertionError("Never rerun search")):
+                selected = management.select_search_results(snapshot, [self.ids[2], self.ids[0], self.ids[0]], store=self.store)
+        finally:
+            self.store.db.set_authorizer(None)
+        self.assertEqual([row["photo_id"] for row in selected["results"]], [self.ids[0], self.ids[2]])
+        self.assertEqual([row["candidate_rank"] for row in selected["results"]], [1, 3])
+        self.assertEqual([row["score"] for row in selected["results"]], [1., -1.])
+        self.assertEqual(selected["selection"]["candidate_count"], 3)
+        self.assertEqual(selected["selection"]["selected_count"], 2)
+        self.assertFalse(selected["selection"]["automatic_classification"])
+        self.assertEqual((selected["model_calls"], selected["image_model_calls"]), (0, 0))
+        self.assertEqual(selected["source_search"]["snapshot_id"], snapshot["snapshot_id"])
+        self.assertNotIn("DO_NOT_FORWARD_THIS_IMAGE", json.dumps(selected))
+        self.assertEqual(snapshot, before)
+        self.assertEqual(self.config.database_path.read_bytes(), database_before)
+
+    def test_show_results_accepts_no_matches_and_html_contains_no_photos(self):
+        self.configure()
+        self.seed(self.ids[0])
+        snapshot = self.search()
+        selected = management.select_search_results(snapshot, [], store=self.store)
+        self.assertEqual(selected["results"], [])
+        self.assertEqual(selected["selection"]["candidate_count"], 1)
+        page = self.report(selected)
+        self.assertIn("未找到适合展示", page)
+        self.assertNotIn('src="data:image/jpeg;base64,', page)
+
+    def test_show_results_allows_all_when_explicitly_selected(self):
+        self.configure()
+        self.seed(self.ids[0])
+        self.seed(self.ids[1])
+        snapshot = self.search()
+        result = management.select_search_results(snapshot, self.ids[:2], store=self.store)
+        self.assertEqual(len(result["results"]), 2)
+        self.assertEqual(result["selection"]["not_selected_count"], 0)
+
+    def test_show_results_rejects_out_of_snapshot_ids_and_invalid_input(self):
+        self.configure()
+        self.seed(self.ids[0])
+        snapshot = self.search()
+        for ids in ([self.ids[-1]], [""], [1], "not-an-array", None):
+            with self.subTest(ids=ids):
+                self.assert_error("INVALID_ARGUMENT", management.select_search_results, snapshot, ids, store=self.store)
+        for malformed in ({}, {**snapshot, "mode": "metadata"}, {**snapshot, "coverage": {}},
+                          {**snapshot, "display_stage": "selected"}, {**snapshot, "results": [{}]},
+                          {**snapshot, "results": snapshot["results"] * 2}):
+            with self.subTest(snapshot=malformed):
+                self.assert_error("INVALID_ARGUMENT", management.select_search_results, malformed, [], store=self.store)
+
+    def test_show_results_rejects_wrong_album_before_reading_photos(self):
+        self.configure()
+        self.seed(self.ids[0])
+        snapshot = self.search()
+        with SQLiteStorage.create(self.base / "other.sqlite") as other:
+            with patch.object(other, "photo", side_effect=AssertionError("Wrong album photos accessed")):
+                self.assert_error("ALBUM_MISMATCH", management.select_search_results, snapshot, [self.ids[0]], store=other)
+
+    def test_show_results_rejects_changed_selected_input(self):
+        self.configure()
+        self.seed(self.ids[0])
+        snapshot = self.search()
+        self.store.put_thumbnail(self.store.photo(self.ids[0]), self.jpeg((250, 240, 230)))
+        self.assert_error("SEARCH_SNAPSHOT_STALE", management.select_search_results, snapshot, [self.ids[0]], store=self.store)
+
+    def test_show_results_cli_keeps_inputs_and_only_renders_selected_images(self):
+        self.configure()
+        self.seed(self.ids[0])
+        self.seed(self.ids[1])
+        snapshot = self.search()
+        source, ids = self.base / "candidates.json", self.base / "ids.json"
+        source.write_text(json.dumps(snapshot), encoding="utf-8")
+        ids.write_text(json.dumps([self.ids[1]]), encoding="utf-8")
+        before = source.read_bytes(), ids.read_bytes()
+        output, page = self.base / "selected.json", self.base / "selected.html"
+        with patch.object(management, "semantic_search", side_effect=AssertionError("No second query")):
+            result = self.command("show-results", str(source), "--ids-file", str(ids),
+                                  "--output", str(output), "--html", str(page))
+        self.assertEqual([row["photo_id"] for row in result["results"]], [self.ids[1]])
+        self.assertEqual(result["results"][0]["candidate_rank"], 2)
+        self.assertNotIn("thumbnail", json.loads(output.read_text(encoding="utf-8"))["results"][0])
+        text = page.read_text(encoding="utf-8")
+        self.assertEqual(text.count('src="data:image/jpeg;base64,'), 1)
+        self.assertIn("不是看图核对", text)
+        self.assertEqual((source.read_bytes(), ids.read_bytes()), before)
+        for destination in (source, ids):
+            self.assert_error("INVALID_ARGUMENT", self.command, "show-results", str(source),
+                              "--ids-file", str(ids), "--output", str(destination))
+
+    def test_raw_semantic_report_is_labeled_unfiltered(self):
+        self.configure()
+        self.seed(self.ids[0])
+        self.assertIn("尚未筛选", self.report(self.search()))
 
     def test_cosine_divides_by_actual_norm_not_just_dot_product(self):
         self.configure()

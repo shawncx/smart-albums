@@ -25,7 +25,19 @@ Search is offline and read-only. It encodes only the query, reports coverage acr
 
 Use the user's Chinese or English query directly, without automatic translation or old description-retrieval prefixes. The current text limit is 64 tokens including EOS; overlong text is rejected, not silently truncated.
 
-Semantic search returns ranked top-K, default 10 and range 1–1000, with photo-ID tie-breaking. It rejects `--after`. Scores are cosine similarities, not probabilities, guaranteed matches, exact count/negation filters or focus/blur measurements. Report missing/stale/invalid coverage rather than implying all photos were searched.
+Semantic search returns ranked top-K candidates, default 10 and range 1–1000, with photo-ID tie-breaking. It rejects `--after`. Numeric candidates include score/rank/gap information and stable input/result identities, but no filenames, photo metadata, image bytes or thumbnail payloads. Scores are cosine similarities, not probabilities, guaranteed matches, exact count/negation filters or focus/blur measurements. Report missing/stale/invalid coverage rather than implying all photos were searched.
+
+## Default display selection
+
+The agent selects useful candidates using only the query and embedding-derived scores, ranks and gaps. **Do not send originals or thumbnails to the agent**, use image tools, or inspect image-containing reports to make that decision. Do not automatically show all candidates or force a fixed number; an empty selection is permitted. Label the result as similarity-based selection, not visual verification.
+
+Save the raw candidates with `--output`, write the chosen IDs as a JSON array, then use:
+
+```text
+management show-results <candidates.json> --ids-file <selected.json> --html <results.html>
+```
+
+The helper validates the album, candidate membership and current selected input/result identities, keeps original ranking, and runs no new query or image encoding. It accepts `[]` for no suitable candidates. The local report contains only selected images for the user to view; give the user its link without feeding its image contents back to the agent. Keep raw candidates for optional diagnostics, not default all-photo display. A top-K subset cannot establish exhaustive matches across the album.
 
 ## Read-only snapshots and validation boundary
 

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 from . import management
 from .config import PhotographyError
@@ -35,6 +36,11 @@ def add_commands(root_subparsers):
     _view_options(search, page=False)
     search.add_argument("--limit", type=int, help="1–1000; metadata default 100, semantic default 10.")
     search.add_argument("--after", help="Stable photo ID cursor; metadata search only.")
+    selected = actions.add_parser("show-results", help="Display explicit IDs from a saved candidate snapshot; no new search or classification.")
+    selected.add_argument("snapshot")
+    selected.add_argument("--ids-file", required=True, help="JSON array selected by the agent/user; [] means no suitable candidates.")
+    selected.add_argument("--output", help="Write a separate selected-results JSON snapshot.")
+    selected.add_argument("--html", help="Write a report containing only the selected candidates.")
     locate = actions.add_parser("original", help="Locate an original and explicitly persist any path/status repair.")
     locate.add_argument("photo_id")
     relink = actions.add_parser("relink", help="Verify content and bind the photo to an explicit new original path.")
@@ -69,7 +75,7 @@ def command(args, store, config):
     if action == "scan-events":
         return management.scan_events(args.scan_id, store=store, limit=args.limit,
                                       after=args.after, changes_only=args.changes_only)
-    if action not in ("create", "open", "photos", "photo", "search"):
+    if action not in ("create", "open", "photos", "photo", "search", "show-results"):
         raise PhotographyError("INVALID_ARGUMENT", "Unknown management operation.")
     if action == "search" and args.mode == "semantic" and args.after is not None:
         raise PhotographyError("INVALID_ARGUMENT", "Semantic search does not accept --after.")
@@ -77,8 +83,16 @@ def command(args, store, config):
     # Reject every unsafe target before query encoding, preview decoding or any export writes.
     output = export_path(args.output, config, store, (".json",)) if args.output else None
     html_output = export_path(args.html, config, store, (".html",)) if args.html else None
-    profile = {"store": store, "profile_id": args.profile_id}
-    if action in ("create", "open"):
+    profile = {"store": store, "profile_id": getattr(args, "profile_id", None)}
+    if action == "show-results":
+        from .cli import read_json_file
+        inputs = [Path(path).expanduser().resolve() for path in (args.snapshot, args.ids_file)]
+        for destination in (output, html_output):
+            if destination is not None and any(destination == source or (
+                    destination.exists() and source.exists() and destination.samefile(source)) for source in inputs):
+                raise PhotographyError("INVALID_ARGUMENT", "Keep candidate and selection files unchanged; export to a different path.")
+        result = management.select_search_results(read_json_file(args.snapshot), read_json_file(args.ids_file), store=store)
+    elif action in ("create", "open"):
         result = management.album_info(**profile, view=action)
     elif action == "photos":
         result = management.photos(**profile, limit=args.limit, after=args.after)

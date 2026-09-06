@@ -82,7 +82,7 @@ The persisted product is a **768-dimensional, whole-image semantic image vector 
 python photography\scripts\photography.py --database <absolute-album.sqlite> management photos --limit 100
 python photography\scripts\photography.py --database <absolute-album.sqlite> management photo <photo-id>
 python photography\scripts\photography.py --database <absolute-album.sqlite> management search "IMG_01" --mode metadata
-python photography\scripts\photography.py --database <absolute-album.sqlite> management search "黑白的枯树" --mode semantic --html <output-directory>\trees.html
+python photography\scripts\photography.py --database <absolute-album.sqlite> management search "黑白的枯树" --mode semantic --output <output-directory>\candidates.json
 python photography\scripts\photography.py --database <absolute-album.sqlite> management search "black and white leafless trees" --mode semantic --profile-id <profile-id>
 python photography\scripts\photography.py --database <absolute-album.sqlite> management original <photo-id>
 python photography\scripts\photography.py --database <absolute-album.sqlite> management relink <photo-id> --path <absolute-original-file>
@@ -90,6 +90,14 @@ python photography\scripts\photography.py --database <absolute-album.sqlite> man
 ```
 
 Metadata mode uses Unicode NFC/casefold literal substrings in filenames and recorded absolute/relative paths; no model/default is needed. Semantic mode uses the selected album's current vectors and a matching query encoder, without generating missing embeddings or mixing profiles. Empty candidates load no model. Report incomplete coverage; cosine scores are not probabilities or guaranteed matches.
+
+By default, the Skill treats semantic results as internal candidates and selects which IDs to display using **embedding similarity scores, ranks and score gaps only**. Images and thumbnails are not passed to the agent, and selection is not visual verification. It may select fewer results or none instead of always returning the whole candidate list.
+
+```text
+python photography\scripts\photography.py --database <absolute-album.sqlite> management show-results <output-directory>\candidates.json --ids-file <output-directory>\selected.json --html <output-directory>\results.html
+```
+
+The selected ID file may contain `[]`. This helper does not repeat a query or modify the album. It validates the captured scope, preserves scores/ranks and creates a report with only the selected photos for the user; the agent returns its link without inspecting its images. The original candidates remain available as diagnostics.
 
 Both modes and plain browsing are read-only and do not stat originals or repair paths. HTML/JSON are snapshots, with no selection widgets, album membership writes or live service. `management thumbnail`, `scan` and `scan-events` retain preview export and ingestion diagnostics. See [management](photography/references/management.md) and [search](photography/references/search.md).
 

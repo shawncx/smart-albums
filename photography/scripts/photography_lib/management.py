@@ -3,11 +3,12 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timezone
+import json
 import math
 import sqlite3
 import time
 import unicodedata
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from .config import PhotographyError
 from .fingerprints import fingerprint
@@ -65,6 +66,108 @@ def _snapshot(view, store, profile, *, mode="metadata"):
         "model_calls": 0,
         "image_model_calls": 0,
     }
+
+
+def validate_snapshot_album(snapshot, store):
+    if (not isinstance(snapshot, dict) or snapshot.get("schema") != SCHEMA
+            or snapshot.get("mode") not in ("metadata", "semantic")):
+        raise PhotographyError("INVALID_ARGUMENT", "Expected an album-snapshot-v1 snapshot.")
+    album = snapshot.get("album")
+    try:
+        snapshot_id = UUID(album["id"])
+    except (TypeError, ValueError, KeyError, AttributeError) as exc:
+        raise PhotographyError("INVALID_ARGUMENT", "The snapshot must identify its album UUID.") from exc
+    current = store.album()
+    if UUID(current["id"]) != snapshot_id:
+        raise PhotographyError("ALBUM_MISMATCH", "This snapshot belongs to a different album; no previews were read.",
+                               details={"snapshot_album": album, "album": current})
+    return current
+
+
+def _search_candidates(snapshot, store):
+    validate_snapshot_album(snapshot, store)
+    try:
+        json.dumps(snapshot, allow_nan=False)
+    except (ValueError, TypeError) as exc:
+        raise PhotographyError("INVALID_ARGUMENT", "Search snapshots must contain finite JSON values.") from exc
+    if (snapshot["mode"] != "semantic" or snapshot.get("view") != "search"
+            or type(snapshot.get("schema_version")) is not int or snapshot["schema_version"] != 1
+            or snapshot.get("component") != "image_embedding"
+            or snapshot.get("display_stage", "candidates") != "candidates"
+            or not isinstance(snapshot.get("snapshot_id"), str) or not snapshot["snapshot_id"]
+            or not isinstance(snapshot.get("profile_id"), str) or not snapshot["profile_id"]
+            or not isinstance(snapshot.get("results"), list)):
+        raise PhotographyError("INVALID_ARGUMENT", "Use an original semantic-search candidate snapshot.")
+    _query(snapshot.get("query"))
+    _limit(snapshot.get("limit"))
+    coverage = snapshot.get("coverage")
+    if (not isinstance(coverage, dict)
+            or any(type(coverage.get(key)) is not int or coverage[key] < 0 for key in (*STATUSES, "total"))
+            or sum(coverage[key] for key in STATUSES) != coverage["total"]
+            or len(snapshot["results"]) > min(snapshot["limit"], coverage["ready"])):
+        raise PhotographyError("INVALID_ARGUMENT", "Search snapshot coverage or candidate count is invalid.")
+    seen = set()
+    previous = None
+    for item in snapshot["results"]:
+        fields = ("photo_id", "result_id", "profile_id", "content_version", "thumbnail_profile", "input_image_hash")
+        if (not isinstance(item, dict)
+                or any(not isinstance(item.get(key), str) or not item[key] for key in fields)
+                or item["profile_id"] != snapshot["profile_id"]
+                or item["photo_id"] in seen
+                or type(item.get("score")) not in (int, float)
+                or not math.isfinite(item["score"]) or not -1 <= item["score"] <= 1):
+            raise PhotographyError("INVALID_ARGUMENT", "Search candidates have invalid identities or scores.")
+        seen.add(item["photo_id"])
+        order = (-item["score"], item["photo_id"])
+        if previous is not None and order < previous:
+            raise PhotographyError("INVALID_ARGUMENT", "Candidate order does not match the saved similarity ranking.")
+        previous = order
+    return snapshot["results"]
+
+
+def _check_candidate(item, store, profile):
+    from .image_embedding import inspect_embedding
+    photo = store.photo(item["photo_id"])
+    entry, record, _ = inspect_embedding(photo, store, profile)
+    fields = ("result_id", "profile_id", "content_version", "thumbnail_profile", "input_image_hash")
+    if entry["status"] != "ready" or any(record[key] != item[key] for key in fields):
+        raise PhotographyError("SEARCH_SNAPSHOT_STALE",
+                               "A candidate changed since this search. Retrieve and review a new snapshot.",
+                               details={"photo_id": item["photo_id"]})
+    return photo
+
+
+def select_search_results(snapshot, photo_ids, *, store):
+    """Render decisions supplied by the caller; never classify images or repeat a query."""
+    if not isinstance(photo_ids, list) or any(not isinstance(pid, str) or not pid for pid in photo_ids):
+        raise PhotographyError("INVALID_ARGUMENT", "Selection must be an array of photo IDs; use [] for no matches.")
+    selected = set(photo_ids)
+    with store.read_snapshot():
+        candidates = _search_candidates(snapshot, store)
+        offered = {item["photo_id"] for item in candidates}
+        if not selected.issubset(offered):
+            raise PhotographyError("INVALID_ARGUMENT", "Only IDs from the saved search candidates may be displayed.")
+        profile = store.embedding_profile(snapshot["profile_id"])
+        results = []
+        for rank, item in enumerate(candidates, 1):
+            if item["photo_id"] in selected:
+                _check_candidate(item, store, profile)
+                result = {key: item[key] for key in (
+                    "photo_id", "result_id", "profile_id", "content_version", "thumbnail_profile", "input_image_hash", "score")}
+                result.update(candidate_rank=rank, score_gap_from_best=candidates[0]["score"] - item["score"],
+                              score_gap_to_next=item["score"] - candidates[rank]["score"] if rank < len(candidates) else None)
+                results.append(result)
+        output = _snapshot("search", store, profile, mode="semantic")
+        output.update(query=snapshot["query"], limit=snapshot["limit"],
+                      coverage={key: snapshot["coverage"][key] for key in (*STATUSES, "total")},
+                      coverage_scope="entire_album", similarity="cosine_not_probability",
+                      selection_evidence="embedding_similarity_only", display_stage="selected", results=results,
+                      source_search={"snapshot_id": snapshot["snapshot_id"]},
+                      selection={"method": "explicit_candidate_ids", "candidate_count": len(candidates),
+                                 "selected_count": len(results), "not_selected_count": len(candidates) - len(results),
+                                 "photo_ids": [item["photo_id"] for item in results],
+                                 "scope": "retrieved_candidates", "automatic_classification": False})
+    return output
 
 
 def _page(items, limit, after):
@@ -180,14 +283,15 @@ def semantic_search(query, *, store, config=None, profile_id=None, limit=10, aft
             entries.append(deepcopy(entry))
             counts[entry["status"]] += 1
             if entry["status"] == "ready":
-                candidate = _photo_item(item, store, profile, entry=entry)
-                candidate.update({key: record[key] for key in (
+                candidate = {"photo_id": item["photo_id"], **{key: record[key] for key in (
                     "result_id", "profile_id", "content_version", "thumbnail_profile", "input_image_hash"
-                )})
+                )}}
                 candidates.append((candidate, vector))
         result = _snapshot("search", store, profile, mode="semantic")
         result.update(query=query, coverage=counts, coverage_items=entries,
                       coverage_scope="entire_album", limit=limit, results=[],
+                      display_stage="candidates",
+                      selection_evidence="embedding_similarity_only",
                       next_cursor=None, similarity="cosine_not_probability",
                       timings={"model_loading_seconds": None, "query_encoding_seconds": None,
                                "query_total_seconds": None, "ranking_seconds": None})
@@ -222,6 +326,10 @@ def semantic_search(query, *, store, config=None, profile_id=None, limit=10, aft
         score = math.fsum(a * b for a, b in zip(query_vector, vector)) / (query_norm * norm)
         ranked.append({**item, "score": max(-1.0, min(1.0, score))})
     ranked.sort(key=lambda item: (-item["score"], item["photo_id"]))
+    for rank, item in enumerate(ranked, 1):
+        item["candidate_rank"] = rank
+        item["score_gap_from_best"] = ranked[0]["score"] - item["score"]
+        item["score_gap_to_next"] = item["score"] - ranked[rank]["score"] if rank < len(ranked) else None
     result["results"] = ranked[:limit]
     result["timings"]["ranking_seconds"] = time.perf_counter() - started
     return result

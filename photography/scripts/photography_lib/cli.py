@@ -41,6 +41,10 @@ def main(argv=None):
             writable = args.command == "index" and (
                 args.index_command in ("setup", "configure", "execute", "resume")
                 or args.index_command == "plan" and not args.dry_run)
+            if args.command == "management" and args.management_command == "folders":
+                from .management_cli import FOLDER_WRITES
+
+                writable = args.folder_command in FOLDER_WRITES
             context = SQLiteStorage.create(config.database_path) if create else \
                 SQLiteStorage.open(config.database_path, writable=writable)
             with context as store:

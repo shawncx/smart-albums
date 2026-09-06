@@ -8,7 +8,7 @@ Recursive, regular JPEG, PNG, WebP, TIFF and BMP files; extensions are case-inse
 
 The photo root and database path must be absolute. SQLite can be beside, above, below or on a different drive from photos: there is no directory-overlap ban. The selected database, its sidecars and machine-local model cache are excluded from photo enumeration. Generated JPEG exports must stay outside saved scan source directories so previews do not become new originals.
 
-One SQLite file is one album. It can receive scans from multiple roots, without a separate library/internal album selector or membership table. See [album-file entry](library.md).
+One SQLite file is one album. It can receive scans from multiple roots, without a separate library/internal album selector. Source roots are not virtual folders; ingestion never automatically adds or regroups folder members. See [album-file entry](library.md).
 
 ## Commands
 
@@ -67,7 +67,11 @@ scanned = added + updated + restored + unchanged + failed
 
 `index_summary` describes saved image-embedding state with `component: image_embedding`; `index_scope` is `successful_photos_in_this_scan`. `model_calls` is zero. Without a configured default, the summary has `status: not_configured`, a null profile and the successful-photo total, not inferred search coverage. The scan summary is not the whole album's coverage or proof of completed technical analysis.
 
-When `index_suggested` is true, `index_prompt` contains an explicit question asking whether to create/update the semantic-search index, plus `component`, `photo_count`, exact `photo_ids`, `profile_id`, `configuration_required` and `requires_confirmation: true`. It also includes `without_index`, `with_index` and `limitations`: browsing, previews/basic metadata and filename/recorded-path lookup work without indexing; a valid index plus its compatible local model adds Chinese/English visual-content semantic search. Semantic scores rank candidates, not guaranteed detections or exact filters.
+When `index_suggested` is true, `index_prompt` contains an explicit question asking whether to create/update the semantic-search index, plus `component`, `photo_count`, exact `photo_ids`, `profile_id`, `configuration_required` and `requires_confirmation: true`. It also includes `without_index`, `with_index` and `limitations`: browsing, previews/basic metadata, filename/recorded-path lookup, custom folder CRUD, manual single/batch membership changes, folder-name search and confirmed EXIF date organization work without indexing; a valid index plus its compatible local model adds Chinese/English visual-content semantic search. Semantic scores rank candidates, not guaranteed detections or exact filters.
+
+Manual custom folders are the primary organization workflow, not an index prerequisite or a fourth capability. The Skill resolves actual photo IDs and writes a one-element JSON array for one photo, or a batch array, for `management folders add <folder-id> --ids-file <photo-ids.json>` (or the corresponding `remove` command). `[]` means no changes. Static, flat many-to-many memberships stay inside this SQLite album; removing membership/deleting a folder never deletes photos, originals, thumbnails or embeddings, nor affects other folders. Names are unique by NFC + casefold and stable IDs survive renaming. See [folder commands](management.md#manual-custom-virtual-folders-primary-workflow).
+
+Optional date organization uses only saved, calendar-valid EXIF `datetime_original` in camera-local time, with no UTC conversion or fallback to modification/other dates. Missing/invalid dates and unavailable ingestion metadata are skipped with counts. Prepare exactly `--all` or `--ids-file`, review the create/reuse preview and digest, then explicitly apply the raw plan atomically. It needs no index or original reads and creates no jobs/live rules; later imports or manual removals are not automatically regrouped. This authorized deterministic metadata operation is not semantic evidence: semantic selection still uses embedding scores/ranks/gaps only, never images, HTML pixels or folder labels.
 
 The Skill must explain this distinction and ask the question in the user's language after import so users know indexing is a separate, optional preparation step for semantic search. With a selected profile, only successful photos without a ready result are offered; ready photos and failed imports are excluded. Without a default, the prompt offers the successful scan scope but explains that configuration must come first, not that all those photos have a known missing cache.
 
@@ -93,8 +97,8 @@ Photo/preview updates use short per-photo transactions with identity rechecks, n
 
 ## Storage and validation boundary
 
-Only schema 8/application ID `0x53414C42` albums are supported. Old v1–v7 databases are rejected unchanged; there is no migration, retired-table cleanup or old CLI compatibility. Existing user databases and backups remain untouched.
+Only schema 9/application ID `0x53414C42` albums with 13 tables are supported. The added tables are `virtual_folders(folder_id, name, name_key, description, created_at, updated_at)` and `virtual_folder_photos(folder_id, photo_id, added_at)`. Old v1–v8 databases are rejected unchanged; there is no migration, retired-table cleanup or old CLI compatibility. Existing user databases and backups remain untouched. Management exports use `album-snapshot-v2` with historical album/folder scope.
 
-Use `management backup --output <new-file>` for a consistent SQLite snapshot; it includes saved previews/embeddings, not originals or weights. Stop operations before moving/cloud-syncing the local album, and use one device writer at a time.
+Use `management backup --output <new-file>` for a consistent SQLite snapshot; it includes saved previews/embeddings and folder memberships, not originals or weights. Stop operations before moving/cloud-syncing the local album, and use one device writer at a time.
 
-The portable code is implemented, with consolidated regression acceptance pending. No new-format real-model trial was performed; prior v7 performance is not new-format acceptance. See [index design](../../docs/index-design.md) and [pending work](../../docs/TODO.md).
+The folder offline regression suite has passed. No new-format real-model trial was performed; prior v7 performance is not new-format acceptance. See [index design](../../docs/index-design.md) and [validation status and pending work](../../docs/TODO.md).

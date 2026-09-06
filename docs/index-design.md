@@ -1,6 +1,6 @@
 # Portable album and image-embedding design
 
-This is the implemented contract derived from the [portable-album plan](portable-album-plan.md), not a benchmark or live acceptance report. Consolidated regression acceptance is pending; no real-model trial against the new format was performed in this implementation. Earlier v7 results do not establish new-format acceptance. The [earlier plan](ingestion-index-management-plan.md) is historical and superseded for storage/CLI; plan documents are not live progress records.
+This is the current implemented portable-album and static virtual-folder contract, not a benchmark. The [portable-album plan](portable-album-plan.md) records the earlier schema 8 milestone; this document supersedes its format/scope contract. The folder offline regression suite has passed; see [validation status](TODO.md). No real-model trial against schema 9 was performed. Earlier results do not establish new-format acceptance. The [earlier plan](ingestion-index-management-plan.md) is historical and superseded for storage/CLI; plan documents are not live progress records.
 
 ## 1. Exactly three public capabilities
 
@@ -8,9 +8,9 @@ This is the implemented contract derived from the [portable-album plan](portable
 | --- | --- | --- |
 | ingestion | Import sources, metadata, dual original paths and proportional SQLite JPEG previews | No inference, automatic indexing or original deletion |
 | index | Explicit setup/configure/plan/execute/status/job/resume for image embeddings | No description intermediate, cloud fallback or technical-parameter generation |
-| management | Album-file create/open/backup, photo browse/search, preview/scan diagnostics and explicit original/relink operations | Browse/search is read-only; no internal memberships, selection widgets, curation or deletion |
+| management | Album-file create/open/backup, manual virtual folders, scoped photo browse/search, one-time date organization, preview/scan diagnostics and original/relink | Browse/search is read-only; no internal albums, selection widgets, automatic regrouping or photo deletion |
 
-These are independent operations within one `smart-albums` Skill. **One album is one SQLite file**, not a container of user-selected internal albums. Select/open or explicitly create the file before data operations; informational questions and `--help` need no file. Switching files clears previous photo/profile/run choices and pending confirmations.
+These are independent operations within one `smart-albums` Skill. **One album is one SQLite file**, not a container of user-selected internal albums. Select/open or explicitly create the file before data operations; informational questions and `--help` need no file. Switching files clears previous photo/profile/run/folder choices and pending confirmations.
 
 Global `--database <absolute-file>` is required, accepts `.sqlite`, `.sqlite3` and `.db`, and has no hidden default. Optional global `--model-cache-dir <root>` consistently configures machine-local weights for index and semantic search. Both precede the capability. No `--state-dir`, internal album/library selectors, old aliases or API compatibility layer remain. Removed analysis/description and `search-add` workflows are not fallbacks.
 
@@ -19,14 +19,14 @@ Global `--database <absolute-file>` is required, accepts `.sqlite`, `.sqlite3` a
 - `SQLiteStorage.create(path)` exclusively claims a nonexistent destination, then initializes in a transaction. The destination parent must already exist. It cannot overwrite an existing file; failure cleans up only the file it owns.
 - `SQLiteStorage.open(path, writable=False)` opens an existing file with SQLite URI `mode=ro`; explicit writers use `mode=rw`, never automatic-create mode.
 - Open verifies the application marker/version, exact table set, required columns, one valid album metadata row, integrity and foreign keys. It performs no DDL, automatic repair, cleanup or migration.
-- New albums use `PRAGMA application_id = 0x53414C42`, `PRAGMA user_version = 8` and rollback journaling rather than default WAL. Commands close connections on completion.
-- Missing/invalid/unrelated/unsupported files and storage access failures are errors, not creation permission. **Existing v1–v7 databases are rejected unchanged.** The user's old database/backups remain untouched; a new file is not an implicit conversion.
+- New albums use `PRAGMA application_id = 0x53414C42`, `PRAGMA user_version = 9` and rollback journaling rather than default WAL. Commands close connections on completion.
+- Missing/invalid/unrelated/unsupported files and storage access failures are errors, not creation permission. **Existing v1–v8 databases are rejected unchanged.** The user's old database/backups remain untouched; there is no migration and a new file is not an implicit conversion.
 
 Management create/open returns `album: {id, name, database_path, ...}`. The ID is a stable UUID; the name is the current filename without extension. Moving/renaming changes location/display name, not identity. Backups/copies retain the UUID and are not independently mergeable branches.
 
 Plain open/browse/search uses read-only storage and never stats originals or writes path repair. `management original`/`relink` are explicit path-maintenance exceptions: they first resolve/check, then open a writer only when persistence is needed. A usable path whose repair cannot be saved is reported as an error with `persisted: false`, not success or missing data.
 
-## 3. Schema 8: exactly 11 tables
+## 3. Schema 9: exactly 13 tables
 
 | Table | Purpose |
 | --- | --- |
@@ -41,6 +41,8 @@ Plain open/browse/search uses read-only storage and never stats originals or wri
 | `image_embedding_items` | Per-photo snapshots/actions, result links, attempts and errors |
 | `image_embedding_claims` | Exclusive current-input execution ownership |
 | `image_embedding_settings` | This album's explicitly chosen default image/text profile |
+| `virtual_folders` | Stable folder ID, display name/unique normalized key, optional description and timestamps |
+| `virtual_folder_photos` | Static folder/photo memberships and addition time |
 
 There are no `libraries`, `albums`, `album_photos`, `image_index_*`, old analysis/text-vector tables, compatibility views or empty `technical_*` placeholders. An empty claims table remains necessary. Source directories are scan scope, not another resource to select.
 
@@ -59,6 +61,27 @@ created_at / updated_at / path_updated_at
 ```
 
 `ingest_state` is `available|error`; `original_status` is `not_checked|available|missing|unavailable`. Availability of an original is not validity of an ingested preview or an embedding. A path repair never clears an ingestion error.
+
+### Static virtual-folder contract
+
+```text
+virtual_folders(folder_id, name, name_key, description, created_at, updated_at)
+virtual_folder_photos(folder_id, photo_id, added_at)
+```
+
+Names are trimmed, nonempty and control-character-free, with unique NFC + casefold `name_key` per album. The stable `folder_id` survives rename; timestamps track creation/actual changes. Names/descriptions are untrusted text, not paths or instructions. Memberships have foreign keys to folders/photos, primary key `(folder_id, photo_id)` and reverse index `(photo_id, folder_id)`; no duplicated photo/path/vector records.
+
+Manual custom CRUD/add/remove is the primary workflow and requires no index. Empty folders and static, flat many-to-many memberships are supported inside this one SQLite album. The Skill resolves actual IDs and writes a one-element JSON array for a single-photo request. Validate all folder/photo IDs and atomically write the whole batch; invalid IDs roll back, duplicates/nonmember removals report unchanged counts, and `[]` means zero changes, never all photos. Folder lists include counts and `photo` includes memberships. Explicit folder writes use writable storage; list/show/browse remain read-only.
+
+Removing membership/deleting a folder never deletes photo records, originals, thumbnails or embeddings and never removes other memberships. Relations bind stable photo IDs; content/path/profile changes do not regroup them. Backups/moves preserve them. No hierarchy, cross-album folders, folder embeddings, jobs or live rules/new capability are added. Full CLI: [management](../photography/references/management.md).
+
+### Optional one-time organization
+
+For explicitly selected semantic candidates and a user-chosen destination, `management folders add <folder-id> --ids-file <selected.json> --search-snapshot <candidates.json>` reuses `management.select_search_results` validation of album/candidate/selected input identities. It performs no new query or image encoding, never defaults to all top-K and does not remove source memberships.
+
+`management folders organize-date (--all|--ids-file <ids.json>) --granularity year|month|day --output <date-plan.json>` prepares a read-only exact-scope plan, independent of pages/top-K. Use only saved EXIF `datetime_original`, calendar-valid camera-local dates with no UTC conversion or fallback to modification/other dates. Missing/invalid dates and unavailable ingestion metadata are skipped with counts, without reading originals or calling a model. This is authorized deterministic organization, not semantic evidence.
+
+The plan previews create/reuse targets (`YYYY`, `YYYY-MM`, `YYYY-MM-DD`), explicit member IDs, skips and digest. CLI output wraps `plan`, `digest`, `output`, `album`, `model_calls: 0`; the file contains the raw plan. `management folders apply-date-plan <date-plan.json> --confirm <digest>` requires actual exact-plan approval, revalidates album/targets/photo inputs, explicitly rejects conflicts/staleness and atomically creates/reuses folders and adds members. It adds no jobs/tables or live rules, does not replace other manual members and never automatically regroups later imports or manual removals.
 
 ## 4. Original paths and ingestion identity
 
@@ -82,7 +105,7 @@ Complete scans check new missing records only for their relevant source-folder s
 
 Enumeration excludes the database, transaction/execution-lock sidecars and model cache. JPEG exports cannot enter saved scan source directories. The old source/database-directory overlap ban is gone, but originals must never be overwritten.
 
-Ingestion's returned `index_prompt` remains mandatory Skill guidance: explain without-index browsing/filename-path lookup versus Chinese/English semantic candidates with a compatible index/model, then ask **in the user's language** about the exact successful not-ready `photo_ids`. No default means configuration is needed, not known cache misses. Empty/all-failed/fully indexed scans do not prompt. An accepted invitation permits preparing a plan, not downloading or executing an unseen digest. A preexisting request to import and index need not repeat the same intent question.
+Ingestion's returned `index_prompt` remains mandatory Skill guidance: explain without-index browsing/filename-path lookup, custom folders/manual membership, folder-name search and confirmed date organization versus Chinese/English semantic candidates with a compatible index/model, then ask **in the user's language** about the exact successful not-ready `photo_ids`. No default means configuration is needed, not known cache misses. Empty/all-failed/fully indexed scans do not prompt. An accepted invitation permits preparing a plan, not downloading or executing an unseen digest. A preexisting request to import and index need not repeat the same intent question. Ingestion never automatically adds/regroups virtual folder members.
 
 ## 5. Images, semantic purpose and model identity
 
@@ -159,13 +182,17 @@ Persisted valid successes are reused after interruption; computation lost before
 
 Coverage is `ready|missing|stale|invalid_input|invalid_vector`, separate from task state and original availability. `index status` reports the entire selected album, with item limit/cursor/status filters; default limit 100, range 1–1000. It loads no model, accesses no originals and does not decode preview JPEG BLOBs. A ready vector does not certify unchecked preview bytes or completed technical parameters.
 
-Metadata search uses NFC/casefold literal substrings in photo filenames and recorded absolute/relative paths. No model/default is needed; there is no album-name/target/internal scope option. Photos and metadata pages use stable photo IDs, default 100 and range 1–1000.
+Metadata search uses NFC/casefold literal substrings in photo filenames and recorded absolute/relative paths. No model/default is needed; there is no album-name/target/internal album scope option. Photos and metadata pages use stable photo IDs, default 100 and range 1–1000.
 
-Semantic search takes a consistent snapshot of saved input metadata/current vectors in one selected profile and reports entire-album coverage. Invalid/stale/absent vectors are excluded. Empty candidates return without model loading; otherwise the query is encoded once and exactly cosine-ranked, ties by photo ID. Default top-K 10, range 1–1000; `--after` is rejected. Search neither reads originals, repairs paths, writes DB state, regenerates photo vectors, changes defaults nor silently changes modes.
+`management photos` and both search modes accept repeatable `--folder-id` and `--folder-match union|intersection`, required for multiple distinct IDs. Duplicates of one ID are one folder. No IDs means the entire album; unknown folders are errors, never fallback; empty folders/intersections remain empty. Filter scope before vector inspection, ranking and top-K, deduplicating unions. Counts, coverage, pagination and gaps describe that scope. Metadata `album_total` is the actual whole count, separate from `scope_total` and query-match counts.
+
+Semantic search takes a consistent snapshot of scoped saved input metadata/current vectors in one selected profile. Invalid/stale/absent vectors are excluded. Empty candidates return without model loading, but still require a valid explicit/configured profile; otherwise the query is encoded once and exactly cosine-ranked, ties by photo ID. Default top-K 10, range 1–1000; `--after` is rejected. Search neither reads originals, repairs paths, writes DB state, regenerates photo vectors, changes defaults nor silently changes modes.
 
 Search checks vector integrity and saved input metadata, not every preview JPEG. Plan/execute and preview rendering validate the bytes they use. Similarity is not probability, a calibrated threshold or guaranteed logical filtering.
 
-`album-snapshot-v1` is a versioned read-only JSON/HTML format with album UUID/path, mode and profile identity. HTML escapes metadata and verifies embedded preview input identities; changed/corrupt/missing previews are errors, not replacements. No original reads are needed. There are no selection widgets, membership writes, legacy search-selection protocol or live service.
+`album-snapshot-v2` is a versioned read-only JSON/HTML format with album UUID/path, mode, profile identity and explicit scope: `{"kind":"album"}` or `{"kind":"virtual_folders","match":"union","folders":[{"folder_id":"...","name":"..."}]}` (also `intersection`). `coverage_scope` is `entire_album` or `selected_folders`. Candidates, `show-results` and reports preserve historical scope and names after folder rename/deletion or membership changes without a new membership query. Selected snapshots retain validated saved scores/ranks/gaps verbatim, including the gap to the next candidate outside returned top-K, rather than recomputing subset gaps. Changed selected photo/input/result identities still error as stale.
+
+Semantic selection uses embedding scores/ranks/gaps only. Folder labels identify scope, never semantic evidence; originals, thumbnails, screenshots and HTML image payloads must not reach the agent. Local HTML is for the user, escapes metadata and verifies embedded preview input identities; changed/corrupt/missing previews are errors, not replacements. No original reads are needed. There are no HTML selection widgets, membership writes, legacy search-selection protocol or live service.
 
 Export protections cover the database, transaction/execution-lock sidecars, local model cache and recorded original candidates, rather than banning the whole database parent. JPEG exports additionally stay outside saved scan roots. Backup destinations must be new; ordinary report/preview outputs are explicitly selected derived files, not no-overwrite database snapshots.
 
@@ -173,13 +200,13 @@ Export protections cover the database, transaction/execution-lock sidecars, loca
 
 Use a single writer on one device. Cloud workflow is **download a complete local file → operate locally → stop/close all work → copy/sync**. Do not open HTTP/S3 URLs or assume network filesystem/concurrent-copy safety. Do not copy a live bare SQLite file or delete its journal/lock sidecars. Each host separately needs compatible dependencies and model files.
 
-`management backup --output <new-file>` uses SQLite's consistent backup API without replacing an existing target. It includes metadata, previews, profiles, vectors and runs; excludes external originals, model weights and Python environments. It preserves album UUID and paths. After relocation, originals need a working absolute address or preserved relative layout, otherwise explicit relink. Backups are not independently writable branches with auto-merge.
+`management backup --output <new-file>` uses SQLite's consistent backup API without replacing an existing target. It includes metadata, previews, profiles, vectors, runs and folder memberships; excludes external originals, model weights and Python environments. It preserves album UUID and paths. After relocation, originals need a working absolute address or preserved relative layout, otherwise explicit relink. Backups are not independently writable branches with auto-merge.
 
 Dependency installation, model setup, real-photo trials and exact-plan inference are separate authorizations. Creating/opening an album or accepting an index invitation does not grant all of them. Ordinary index/search never downloads missing files or falls back to cloud analysis. The user's existing old database/backups are not trial targets.
 
 ## 10. Pending validation and future components
 
-The portable refactor is implemented, but consolidated regression acceptance is pending. **No new-format real-model trial was performed in this implementation.** Earlier v7 performance/quality is historical, not new-format acceptance. Synthetic tests cannot establish speed, memory, retrieval quality or genuine disconnected-runtime behavior.
+The folder offline regression suite has passed; see [validation status](TODO.md) for the tested scope. **No schema 9 real-model trial was performed in this implementation.** Earlier performance/quality is historical, not new-format acceptance. Synthetic tests cannot establish speed, memory, retrieval quality or genuine disconnected-runtime behavior.
 
 Future separately authorized evaluation should verify download reuse/recovery and actual offline execution, start with non-sensitive images, then use explicitly selected representative photos. Assess paired Chinese/English queries, difficult combinations/no-match cases, and separately measure load/image/query/ranking time and memory.
 

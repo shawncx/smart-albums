@@ -4,6 +4,8 @@
 
 修订：2026-09-06。本版明确 `image_embedding_*` 命名、向量的输入/用途，以及未来技术参数的独立边界。
 
+> 后续合同说明：本文保留 schema 8 便携相册计划及其验收历史，不追改为新功能记录。当前静态 virtual folder 合同见 [现行设计](index-design.md)：schema 9、13 张表，新增 `virtual_folders` 与 `virtual_folder_photos`，采用 `album-snapshot-v2`；v1–v8 原样拒绝、不迁移。手动自定义 CRUD/单张或批量成员管理是基础能力，范围搜索和一次性日期/搜索结果加入均属 management，不引入自动归类或第四能力。
+
 ## 1. 已确认目标
 
 1. **一个 album 对应一个 SQLite 文件**，不再有“选择图库后再选择内部相册”。

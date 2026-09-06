@@ -121,6 +121,7 @@ class CapabilityTests(unittest.TestCase):
         self.assertTrue(prompt["configuration_required"])
         self.assertIn("filename", " ".join(prompt["without_index"]))
         self.assertIn("Chinese/English semantic", " ".join(prompt["with_index"]))
+        self.assertIn("virtual folders", " ".join(prompt["without_index"]))
         with SQLiteStorage.open(self.database) as store:
             self.assertEqual(store.db.execute("SELECT COUNT(*) FROM image_embedding_runs").fetchone()[0], 0)
 
@@ -193,6 +194,140 @@ class CapabilityTests(unittest.TestCase):
                          ("management", "search", "wide", "--mode", "metadata"), ("index", "profiles")):
                 self.assertEqual(self.cli(*args)[0], 0)
         self.assertEqual(self.database.read_bytes(), before)
+
+    def write_ids(self, ids, filename="ids.json"):
+        path = self.root / filename
+        path.write_text(json.dumps(ids), encoding="utf-8")
+        return str(path)
+
+    def create_folder(self, name):
+        code, result = self.cli("management", "folders", "create", "--name", name)
+        self.assertEqual(code, 0, result)
+        return result["folder"]["folder_id"]
+
+    def test_manual_folder_cli_persists_without_index_and_preserves_other_memberships(self):
+        first = self.create_folder("custom")
+        second = self.create_folder("favorites")
+        ids = self.scan["successful_photo_ids"]
+        path = self.write_ids(ids[:1])
+        for folder in (first, second):
+            code, result = self.cli("management", "folders", "add", folder, "--ids-file", path)
+            self.assertEqual(code, 0, result)
+        before = self.database.read_bytes()
+        for args in (("folders", "list"), ("folders", "show", first),
+                     ("photos", "--folder-id", first),
+                     ("search", "jpg", "--mode", "metadata", "--folder-id", first)):
+            with self.subTest(args=args):
+                code, _ = self.cli("management", *args)
+                self.assertEqual(code, 0)
+        self.assertEqual(self.database.read_bytes(), before)
+        with SQLiteStorage.open(self.database) as store:
+            photo_before = store.photo(ids[0])
+            thumb_before = store.thumbnail(ids[0])
+            self.assertEqual(len(store.photo_folders(ids[0])), 2)
+        self.assertEqual(self.cli("management", "folders", "rename", first, "--name", "renamed")[0], 0)
+        self.assertEqual(self.cli("management", "folders", "remove", first, "--ids-file", path)[0], 0)
+        self.assertEqual(self.cli("management", "folders", "delete", second)[0], 0)
+        with SQLiteStorage.open(self.database) as store:
+            self.assertEqual(store.photo_folders(ids[0]), [])
+            self.assertEqual(store.folder(first)["name"], "renamed")
+            self.assertEqual(store.photo(ids[0]), photo_before)
+            self.assertEqual(store.thumbnail(ids[0]), thumb_before)
+            self.assertEqual(store.db.execute("SELECT COUNT(*) FROM image_embedding_profiles").fetchone()[0], 0)
+
+    def test_search_selected_ids_can_be_added_without_querying_again(self):
+        with patch("photography_lib.siglip_embedding.SiglipEncoder", return_value=self.encoder):
+            self.index()
+            source = self.create_folder("source")
+            target = self.create_folder("target")
+            ids = self.scan["successful_photo_ids"]
+            path = self.write_ids(ids[:1])
+            self.assertEqual(self.cli("management", "folders", "add", source, "--ids-file", path)[0], 0)
+            snapshot = self.root / "candidates.json"
+            code, result = self.cli("management", "search", "winter", "--mode", "semantic",
+                                    "--folder-id", source, "--output", str(snapshot))
+            self.assertEqual(code, 0, result)
+            calls = self.encoder.calls
+            with SQLiteStorage.open(self.database) as store:
+                vectors = [tuple(row) for row in store.db.execute("SELECT * FROM image_embedding_results ORDER BY result_id")]
+            code, added = self.cli("management", "folders", "add", target, "--ids-file", path,
+                                   "--search-snapshot", str(snapshot))
+            self.assertEqual(code, 0, added)
+            self.assertEqual(self.encoder.calls, calls)
+        with SQLiteStorage.open(self.database) as store:
+            self.assertEqual({f["folder_id"] for f in store.photo_folders(ids[0])}, {source, target})
+            self.assertEqual([tuple(row) for row in store.db.execute("SELECT * FROM image_embedding_results ORDER BY result_id")], vectors)
+        before = self.database.read_bytes()
+        code, failure = self.cli("management", "folders", "add", target, "--ids-file",
+                                 self.write_ids(ids, "outside.json"), "--search-snapshot", str(snapshot))
+        self.assertEqual(code, 2, failure)
+        self.assertEqual(self.database.read_bytes(), before)
+
+    def test_date_plan_cli_is_readonly_and_application_is_explicit(self):
+        with SQLiteStorage.open(self.database, writable=True) as store:
+            first, second = store.photos()
+            store.put_photo({**first, "metadata": {**first["metadata"], "exif": {
+                "datetime_original": "2026:01:31 23:59:59", "offset_time_original": "-08:00"}}})
+            store.put_photo({**second, "metadata": {**second["metadata"], "exif": {
+                "datetime_original": "2026:02:30 10:00:00"}}})
+        before = self.database.read_bytes()
+        path = self.root / "date-plan.json"
+        code, proposal = self.cli("management", "folders", "organize-date", "--all",
+                                  "--granularity", "month", "--output", str(path))
+        self.assertEqual(code, 0, proposal)
+        self.assertEqual(json.loads(path.read_text(encoding="utf-8")), proposal["plan"])
+        self.assertEqual(self.database.read_bytes(), before)
+        code, failure = self.cli("management", "folders", "apply-date-plan", str(path), "--confirm", "wrong")
+        self.assertEqual(code, 2, failure)
+        self.assertEqual(self.database.read_bytes(), before)
+        code, applied = self.cli("management", "folders", "apply-date-plan", str(path), "--confirm", proposal["digest"])
+        self.assertEqual(code, 0, applied)
+        with SQLiteStorage.open(self.database) as store:
+            folder = store.folder_by_name_key("2026-01")
+            self.assertIsNotNone(folder)
+            self.assertEqual([p["photo_id"] for p in store.photos_in_folders([folder["folder_id"]], "union")],
+                             [first["photo_id"]])
+            self.assertEqual(store.photo_folders(second["photo_id"]), [])
+
+    def test_explicit_null_search_snapshot_cannot_turn_into_manual_add(self):
+        folder = self.create_folder("empty")
+        ids = self.write_ids(self.scan["successful_photo_ids"])
+        invalid = self.root / "null.json"
+        invalid.write_text("null\n", encoding="utf-8")
+        before = self.database.read_bytes()
+        code, result = self.cli("management", "folders", "add", folder, "--ids-file", ids,
+                                "--search-snapshot", str(invalid))
+        self.assertEqual(code, 2)
+        self.assertEqual(result["error"]["code"], "INVALID_ARGUMENT")
+        self.assertEqual(self.database.read_bytes(), before)
+
+    def test_date_export_cannot_overwrite_id_input_or_album(self):
+        path = self.write_ids(self.scan["successful_photo_ids"])
+        before = Path(path).read_bytes(), self.database.read_bytes()
+        for output in (path, str(self.database), str(self.cache / "date-plan.json")):
+            with self.subTest(output=output):
+                code, failure = self.cli("management", "folders", "organize-date", "--ids-file", path,
+                                         "--granularity", "day", "--output", output)
+                self.assertEqual(code, 2, failure)
+        self.assertEqual((Path(path).read_bytes(), self.database.read_bytes()), before)
+
+    def test_ingestion_and_index_preserve_static_memberships_without_auto_adding(self):
+        folder = self.create_folder("chosen")
+        selected = self.scan["successful_photo_ids"][:1]
+        path = self.write_ids(selected)
+        self.assertEqual(self.cli("management", "folders", "add", folder, "--ids-file", path)[0], 0)
+        Image.new("RGB", (60, 90), "white").save(self.source / "new.jpg")
+        self.assertEqual(self.cli("ingestion", str(self.source))[0], 0)
+        with patch("photography_lib.siglip_embedding.SiglipEncoder", return_value=self.encoder):
+            _, run = self.index()
+        self.assertEqual(self.encoder.calls, 3)
+        with SQLiteStorage.open(self.database) as store:
+            self.assertEqual(len(store.photos()), 3)
+            self.assertEqual([p["photo_id"] for p in store.photos_in_folders([folder], "union")], selected)
+        self.assertEqual(self.cli("management", "folders", "remove", folder, "--ids-file", path)[0], 0)
+        self.assertEqual(self.cli("ingestion", str(self.source))[0], 0)
+        code, page = self.cli("management", "photos", "--folder-id", folder)
+        self.assertEqual((code, page["total"]), (0, 0))
 
 
 if __name__ == "__main__":

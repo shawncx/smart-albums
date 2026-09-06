@@ -8,7 +8,7 @@ import json
 
 from .config import PhotographyError
 from .exports import export_path
-from .management import validate_snapshot_album
+from .management import snapshot_scope, validate_snapshot_album
 from .source_paths import photo_filename
 
 
@@ -47,6 +47,7 @@ def management_report(snapshot, output, *, config, store):
     cards = []
     with store.read_snapshot():
         validate_snapshot_album(snapshot, store)
+        scope = snapshot_scope(snapshot)
         album = snapshot["album"]
         semantic = snapshot["mode"] == "semantic"
         selected = semantic and snapshot.get("display_stage") == "selected"
@@ -73,6 +74,13 @@ def management_report(snapshot, output, *, config, store):
     header += "<p>相册 UUID：" + _text(album["id"]) + "</p>"
     if "query" in snapshot:
         header += "<p>查询：" + _text(snapshot["query"]) + "</p>"
+    if scope["kind"] == "virtual_folders":
+        operation = "并集" if scope["match"] == "union" else "交集"
+        names = "、".join(folder["name"] for folder in scope["folders"])
+        header += "<p>查询时文件夹范围（" + operation + "）：" + _text(names) + "</p>"
+        header += "<p>此范围记录查询时的文件夹名称和成员；后续修改不触发重新搜索。</p>"
+    else:
+        header += "<p>查询范围：整个相册。</p>"
     header += "<p>只读历史快照 · " + _text(snapshot.get("created_at", "")) + "</p>"
     header += "<p>图片语义向量配置（image_embedding）：" + _text(snapshot.get("embedding_configuration")) + "</p>"
     if semantic:
@@ -88,7 +96,8 @@ def management_report(snapshot, output, *, config, store):
                "余弦相似度不是概率。图片语义向量可用不代表已完成对焦或模糊等技术检查。"
                "本页面不会修改相册或索引。</p>")
     if "coverage" in snapshot:
-        header += "<h2>整个相册的图片语义向量覆盖率</h2><pre>" + _json(snapshot["coverage"]) + "</pre>"
+        label = "整个相册" if scope["kind"] == "album" else "所选文件夹范围"
+        header += "<h2>" + label + "的图片语义向量覆盖率</h2><pre>" + _json(snapshot["coverage"]) + "</pre>"
     header += "</header>"
     page = """<!doctype html><html lang="zh-CN"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">

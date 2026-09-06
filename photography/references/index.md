@@ -4,7 +4,7 @@ Index is one of the three public Skill capabilities, operating on one explicitly
 
 ## Optional runtime and authorization
 
-The base Skill does not import optional inference dependencies for ingestion, browsing, metadata search or index status. The pinned optional environment is **standard GIL-enabled CPython 3.14, 64-bit x86-64**, targeting Windows CPU wheels. It is not the broader Python 3.12+ base contract and does not support substituting a free-threaded interpreter.
+The base Skill does not import optional inference dependencies for ingestion, browsing, metadata search, manual virtual folders, date organization or index status. The pinned optional environment is **standard GIL-enabled CPython 3.14, 64-bit x86-64**, targeting Windows CPU wheels. It is not the broader Python 3.12+ base contract and does not support substituting a free-threaded interpreter.
 
 Install [requirements-index.txt](../requirements-index.txt) only into a dedicated compatible project virtual environment:
 
@@ -63,7 +63,7 @@ index job <run-id>
 index resume <run-id> [--confirm-stopped]
 ```
 
-There are no album/library scope options, `--model-dir`, `--state-dir` or old command/API aliases. The selected file is the album. Plans/status/execution identify `component: image_embedding`; this does not represent completion of future technical processing.
+There are no album/library scope options, `--model-dir`, `--state-dir` or old command/API aliases. The selected file is the album. Folder scope flags belong to management browse/search, not index; indexing a chosen subset still uses explicit photo IDs. Plans/status/execution identify `component: image_embedding`; this does not represent completion of future technical processing.
 
 ### Shared machine-local cache
 
@@ -143,8 +143,10 @@ Report coverage for the scope actually inspected and distinguish unknown/not-che
 
 ## Storage and validation boundary
 
-Schema 8/application ID `0x53414C42` has 11 tables: five for the album/photos/previews/scans and six `image_embedding_profiles/results/runs/items/claims/settings`. Claims remain required even when empty. No `image_index_*`, description-vector, multi-album or placeholder `technical_*` tables are created. Query vectors are not persisted.
+Schema 9/application ID `0x53414C42` has 13 tables: five for the album/photos/previews/scans, six `image_embedding_profiles/results/runs/items/claims/settings`, `virtual_folders(folder_id, name, name_key, description, created_at, updated_at)` and `virtual_folder_photos(folder_id, photo_id, added_at)`. Claims remain required even when empty. No `image_index_*`, description-vector, multi-album or placeholder `technical_*` tables are created. Query vectors are not persisted.
 
-Old v1–v7 files are rejected unchanged, with no migration or compatibility layer. The user's existing old database and backups remain untouched. See [index design](../../docs/index-design.md).
+Manual custom folders are primary management operations, not an indexing step or new capability. Static, flat many-to-many memberships bind photo IDs, need no index and survive profile/content/path changes without automatic regrouping. Removing membership/deleting a folder never deletes photos, originals, thumbnails or embeddings. Confirmed EXIF date organization is deterministic metadata work, not semantic evidence. Semantic folder search still requires current valid vectors and a compatible local query encoder; it filters scope before vector inspection/ranking/top-K. Empty scope loads no encoder but still requires a valid selected/configured profile. `album-snapshot-v2` preserves historical scope; folder labels cannot replace embedding scores/ranks/gaps for selection.
 
-The portable code is implemented; consolidated regression acceptance is pending. **No new-format real-model trial was performed in this implementation.** Prior v7 timing/quality results are not new-format acceptance. Synthetic tests cannot establish actual download recovery, disconnected inference, memory, latency or retrieval quality; these need separately authorized evaluation.
+Old v1–v8 files are rejected unchanged, with no migration or compatibility layer. The user's existing old database and backups remain untouched. See [index design](../../docs/index-design.md).
+
+The folder offline regression suite has passed; see [validation status](../../docs/TODO.md). **No new-format real-model trial was performed in this implementation.** Prior v7 timing/quality results are not new-format acceptance. Synthetic tests cannot establish actual download recovery, disconnected inference, memory, latency or retrieval quality; these need separately authorized evaluation.

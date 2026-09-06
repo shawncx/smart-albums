@@ -20,7 +20,7 @@ from PIL import Image
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "photography" / "scripts"))
 
-from photography_lib import management, management_cli, source_paths
+from photography_lib import management, management_cli, source_paths, virtual_folders
 from photography_lib.config import Config, PhotographyError
 from photography_lib.exports import export_path
 from photography_lib.image_embedding_profiles import default_model_dir
@@ -151,7 +151,8 @@ class ManagementTests(unittest.TestCase):
     def test_create_and_open_describe_one_album_without_loading_models(self):
         for action in ("create", "open"):
             result = self.command(action)
-            self.assertEqual(result["schema"], "album-snapshot-v1")
+            self.assertEqual(result["schema"], "album-snapshot-v2")
+            self.assertEqual(result["schema_version"], 2)
             self.assertEqual(result["view"], action)
             self.assertEqual(result["album"]["database_path"], str(self.config.database_path))
             self.assertEqual(result["album"]["name"], self.config.database_path.stem)
@@ -177,7 +178,7 @@ class ManagementTests(unittest.TestCase):
         self.assertEqual(single["items"][0]["preview_integrity"], "unchecked")
         self.assertEqual(single["items"][0]["original_verification"], "not_checked")
         self.assertEqual(page["album"], self.store.album())
-        self.assertNotIn("scope", page)
+        self.assertEqual(page["scope"], {"kind": "album"})
         self.assertNotIn("target", page)
         self.assertFalse(self.source.exists())
 
@@ -494,6 +495,166 @@ class ManagementTests(unittest.TestCase):
             self.assertEqual(result["total"], 1)
             self.assertEqual(result["items"][0]["image_embedding"]["status"], "not_configured")
             self.assert_error("INDEX_CONFIGURATION_REQUIRED", management.semantic_search, "x", store=other)
+
+    def folder(self, name, ids=()):
+        folder = virtual_folders.create_folder(name, store=self.store)["folder"]
+        virtual_folders.add_photos(folder["folder_id"], list(ids), store=self.store)
+        return folder["folder_id"]
+
+    def test_album_folder_count_and_single_photo_memberships(self):
+        winter = self.folder("winter", self.ids[:2])
+        favorites = self.folder("favorites", self.ids[:1])
+        self.assertEqual(self.command("open")["folder_count"], 2)
+        photo = self.command("photo", self.ids[0])["items"][0]
+        self.assertEqual({f["folder_id"] for f in photo["virtual_folders"]}, {winter, favorites})
+        self.assertEqual(self.command("photo", self.ids[-1])["items"][0]["virtual_folders"], [])
+
+    def test_folder_scope_precedes_vector_inspection_and_top_k(self):
+        from photography_lib.image_embedding import inspect_embedding
+
+        self.configure()
+        self.seed(self.ids[0], (1., 0., 0.))
+        self.seed(self.ids[1], (.6, .8, 0.))
+        self.seed(self.ids[2], (0., 1., 0.))
+        folder = self.folder("chosen", self.ids[1:3])
+        encoder = FakeEncoder(self.profile)
+        changes = self.store.db.total_changes
+        with patch("photography_lib.image_embedding.inspect_embedding", wraps=inspect_embedding) as inspect:
+            result = self.search(folder_ids=[folder], limit=1, encoder=encoder)
+        self.assertEqual([call.args[0]["photo_id"] for call in inspect.call_args_list], self.ids[1:3])
+        self.assertEqual([item["photo_id"] for item in result["results"]], self.ids[1:2])
+        self.assertEqual(result["coverage"]["total"], 2)
+        self.assertEqual(result["coverage"]["ready"], 2)
+        self.assertEqual(result["coverage"]["missing"], 0)
+        self.assertEqual(result["coverage_scope"], "selected_folders")
+        self.assertAlmostEqual(result["results"][0]["score_gap_to_next"], .6, places=6)
+        selected = management.select_search_results(result, self.ids[1:2], store=self.store)
+        self.assertEqual(selected["results"], result["results"])
+        self.assertEqual(encoder.queries, ["街上的人"])
+        self.assertEqual(self.store.db.total_changes, changes)
+        for forbidden in ("metadata", "filename", "thumbnail", "virtual_folders"):
+            self.assertNotIn(forbidden, result["results"][0])
+
+    def test_union_intersection_scope_is_shared_by_browsing_and_both_search_modes(self):
+        self.configure()
+        for pid in self.ids:
+            self.seed(pid)
+        first = self.folder("first", self.ids[:3])
+        second = self.folder("second", self.ids[1:4])
+        for match, expected in (("union", self.ids[:4]), ("intersection", self.ids[1:3])):
+            with self.subTest(match=match):
+                scope = {"folder_ids": [second, first, second], "folder_match": match}
+                page = management.photos(store=self.store, **scope, limit=1)
+                remainder = management.photos(store=self.store, **scope, after=page["next_cursor"])
+                self.assertEqual([p["photo_id"] for p in page["items"] + remainder["items"]], expected)
+                self.assertEqual(page["total"], len(expected))
+                metadata = management.metadata_search("jpg", store=self.store, **scope)
+                semantic = self.search(**scope)
+                self.assertEqual([p["photo_id"] for p in metadata["items"]], expected)
+                self.assertEqual([p["photo_id"] for p in semantic["results"]], expected)
+                self.assertEqual(metadata["scope"], semantic["scope"])
+                self.assertEqual(metadata["album_total"], 6)
+                self.assertEqual(metadata["scope_total"], len(expected))
+                self.assertEqual(semantic["coverage"]["total"], len(expected))
+                self.assertEqual([f["folder_id"] for f in page["scope"]["folders"]], sorted([first, second]))
+
+    def test_scope_errors_never_fall_back_to_whole_album(self):
+        self.configure()
+        self.seed(self.ids[0])
+        first = self.folder("first", self.ids[:1])
+        second = self.folder("second", self.ids[1:2])
+        for kwargs in ({"folder_ids": [first, second]}, {"folder_match": "union"},
+                       {"folder_ids": [first], "folder_match": "invalid"}):
+            with self.subTest(kwargs=kwargs):
+                self.assert_error("INVALID_ARGUMENT", management.photos, store=self.store, **kwargs)
+                self.assert_error("INVALID_ARGUMENT", management.metadata_search, "jpg", store=self.store, **kwargs)
+                self.assert_error("INVALID_ARGUMENT", self.search, **kwargs)
+        encoder = FakeEncoder(self.profile)
+        with self.assertRaises(PhotographyError):
+            self.search(folder_ids=[first, "nonexistent"], folder_match="union", encoder=encoder)
+        self.assertEqual(encoder.queries, [])
+        self.assertEqual(management.photos(store=self.store, folder_ids=[first, first])["total"], 1)
+
+    def test_empty_folder_or_intersection_does_not_encode_query(self):
+        self.configure()
+        self.seed(self.ids[0])
+        empty = self.folder("empty")
+        first = self.folder("first", self.ids[:1])
+        second = self.folder("second", self.ids[1:2])
+        for ids, match in (([empty], None), ([first, second], "intersection")):
+            encoder = FakeEncoder(self.profile)
+            result = self.search(folder_ids=ids, folder_match=match, encoder=encoder)
+            self.assertEqual(result["results"], [])
+            self.assertEqual(result["coverage"]["total"], 0)
+            self.assertEqual(result["model_calls"], 0)
+            self.assertEqual(encoder.queries, [])
+            self.assertEqual(management.photos(store=self.store, folder_ids=ids, folder_match=match)["total"], 0)
+            self.assertEqual(management.metadata_search("jpg", store=self.store,
+                             folder_ids=ids, folder_match=match)["total"], 0)
+
+    def test_folder_search_scope_is_historical_across_changes_during_encoding(self):
+        self.configure()
+        self.seed(self.ids[0])
+        folder = self.folder("original <folder>", self.ids[:1])
+
+        def change_folders():
+            self.assertFalse(self.store.db.in_transaction)
+            virtual_folders.rename_folder(folder, "renamed", store=self.store)
+            virtual_folders.remove_photos(folder, self.ids[:1], store=self.store)
+            virtual_folders.delete_folder(folder, store=self.store)
+
+        snapshot = self.search(folder_ids=[folder], encoder=FakeEncoder(self.profile, on_encode=change_folders))
+        snapshot["scope"]["pixels"] = "DO_NOT_FORWARD"
+        snapshot["scope"]["folders"][0]["pixels"] = "DO_NOT_FORWARD"
+        with patch.object(management, "semantic_search", side_effect=AssertionError("No repeated query")):
+            selected = management.select_search_results(snapshot, self.ids[:1], store=self.store)
+        self.assertEqual(selected["scope"]["folders"], [{"folder_id": folder, "name": "original <folder>"}])
+        self.assertEqual(selected["coverage_scope"], "selected_folders")
+        self.assertEqual(selected["coverage"]["total"], 1)
+        self.assertNotIn("DO_NOT_FORWARD", json.dumps(selected))
+        html = self.report(selected)
+        self.assertIn("查询时文件夹范围", html)
+        self.assertIn("original &lt;folder&gt;", html)
+        self.assertIn("所选文件夹范围的图片语义向量覆盖率", html)
+        self.assertNotIn("整个相册的图片语义向量覆盖率", html)
+        self.store.put_thumbnail(self.store.photo(self.ids[0]), self.jpeg((250, 240, 230)))
+        self.assert_error("SEARCH_SNAPSHOT_STALE", management.select_search_results, snapshot,
+                          self.ids[:1], store=self.store)
+
+    def test_malformed_snapshot_scopes_are_rejected(self):
+        self.configure()
+        self.seed(self.ids[0])
+        snapshot = self.search()
+        for scope in (None, {}, {"kind": "unknown"}, {"kind": "album", "folders": []},
+                      {"kind": "virtual_folders", "match": "union", "folders": []},
+                      {"kind": "virtual_folders", "match": "union", "folders": [{"folder_id": 1, "name": "x"}]},
+                      {"kind": "virtual_folders", "match": "union",
+                       "folders": [{"folder_id": "x", "name": "X"}, {"folder_id": "x", "name": "X"}]}):
+            with self.subTest(scope=scope):
+                self.assert_error("INVALID_ARGUMENT", management.select_search_results, {**snapshot, "scope": scope},
+                                  [], store=self.store)
+        self.assert_error("INVALID_ARGUMENT", management.select_search_results,
+                          {**snapshot, "coverage_scope": "selected_folders"}, [], store=self.store)
+        self.assert_error("INVALID_ARGUMENT", management.select_search_results,
+                          {**snapshot, "schema": "album-snapshot-v1", "schema_version": 1}, [], store=self.store)
+        for key, value in (("candidate_rank", True), ("score_gap_from_best", 1),
+                           ("score_gap_to_next", 1)):
+            malformed = deepcopy(snapshot)
+            malformed["results"][0][key] = value
+            self.assert_error("INVALID_ARGUMENT", management.select_search_results, malformed, [], store=self.store)
+
+    def test_scoped_cli_arguments_reach_both_search_modes_and_photos(self):
+        self.configure()
+        self.seed(self.ids[0])
+        first = self.folder("first", self.ids[:2])
+        second = self.folder("second", self.ids[:1])
+        args = ("--folder-id", first, "--folder-id", second, "--folder-match", "intersection")
+        self.assertEqual(self.command("photos", *args)["total"], 1)
+        self.assertEqual(self.command("search", "jpg", "--mode", "metadata", *args)["total"], 1)
+        with patch("photography_lib.siglip_embedding.SiglipEncoder", return_value=FakeEncoder(self.profile)):
+            result = self.command("search", "query", "--mode", "semantic", *args)
+        self.assertEqual([p["photo_id"] for p in result["results"]], self.ids[:1])
+        self.assertEqual(result["scope"]["match"], "intersection")
 
     def test_cli_contract_defaults_and_removed_options(self):
         self.assertEqual(self.command("photo", self.ids[0])["view"], "photo")

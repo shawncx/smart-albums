@@ -119,7 +119,7 @@ class AlbumFileTests(unittest.TestCase):
             SQLiteStorage(self.path)
         self.assertFalse(self.path.exists())
 
-    def test_create_returns_open_writable_v8_album_with_exact_tables(self):
+    def test_create_returns_open_writable_v9_album_with_exact_tables(self):
         with SQLiteStorage.create(self.path) as store:
             self.assertTrue(store.writable)
             self.assertEqual(store.database_path, self.path)
@@ -130,7 +130,8 @@ class AlbumFileTests(unittest.TestCase):
             tables = {row[0] for row in store.db.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
             self.assertEqual(tables, set(REQUIRED_COLUMNS))
-            self.assertEqual(len(tables), 11)
+            self.assertEqual(len(tables), 13)
+            self.assertEqual(SCHEMA_VERSION, 9)
             self.assertEqual(store.photos(), [])
             album = store.album()
             self.assertEqual(album["name"], self.path.stem)
@@ -255,11 +256,30 @@ class AlbumFileTests(unittest.TestCase):
                     SQLiteStorage.open(path, writable=writable)
                 self.assertEqual(before, self.snapshot())
 
+    def test_all_previous_versions_are_rejected_without_migration(self):
+        for version in range(1, 9):
+            path = self.base / f"v{version}.sqlite"
+            with SQLiteStorage.create(path) as store:
+                store.db.execute("DROP TABLE virtual_folder_photos")
+                store.db.execute("DROP TABLE virtual_folders")
+                store.put_photo(self.photo())
+                store.db.execute(f"PRAGMA user_version={version}")
+            before = self.snapshot()
+            for writable in (False, True):
+                with self.subTest(version=version, writable=writable), self.assertRaises(PhotographyError) as failure:
+                    SQLiteStorage.open(path, writable=writable)
+                self.assertEqual(failure.exception.code, "SCHEMA_UNSUPPORTED")
+                self.assertIn("not migrated", str(failure.exception))
+                self.assertEqual(before, self.snapshot())
+
     def test_open_rejects_missing_table_and_columns_without_schema_repair(self):
         mutations = (
             "DROP TABLE thumbnails",
             "ALTER TABLE photos DROP COLUMN last_path_error",
             "ALTER TABLE image_embedding_profiles RENAME COLUMN profile_json TO wrong_json",
+            "DROP TABLE virtual_folder_photos",
+            "ALTER TABLE virtual_folders RENAME COLUMN name_key TO wrong_key",
+            "ALTER TABLE virtual_folder_photos RENAME COLUMN added_at TO wrong_timestamp",
             "CREATE TABLE technical_placeholder (id TEXT)",
         )
         for number, mutation in enumerate(mutations):
@@ -436,7 +456,7 @@ class AlbumFileTests(unittest.TestCase):
             self.assertEqual(stored.album()["name"], "backup")
             self.assertEqual(stored.photo("photo_a"), photo)
             self.assertEqual(stored_preview(photo, stored), data)
-            self.assertEqual(stored.db.execute("PRAGMA user_version").fetchone()[0], 8)
+            self.assertEqual(stored.db.execute("PRAGMA user_version").fetchone()[0], 9)
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_backup_does_not_overwrite_destination_or_source(self):

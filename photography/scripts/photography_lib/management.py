@@ -7,15 +7,16 @@ import json
 import math
 import sqlite3
 import time
-import unicodedata
 from uuid import UUID, uuid4
 
 from .config import PhotographyError
 from .fingerprints import fingerprint
 from .source_paths import photo_filename
+from .text import fold_text
+from .virtual_folders import resolve_scope
 
 
-SCHEMA = "album-snapshot-v1"
+SCHEMA = "album-snapshot-v2"
 STATUSES = ("ready", "missing", "stale", "invalid_input", "invalid_vector")
 
 
@@ -37,10 +38,6 @@ def _query(query):
     return query
 
 
-def _fold(text):
-    return unicodedata.normalize("NFC", text).casefold()
-
-
 def _profile(store, profile_id, *, required=False):
     from .image_embedding import resolve_profile
 
@@ -49,15 +46,16 @@ def _profile(store, profile_id, *, required=False):
     return resolve_profile(store, profile_id)
 
 
-def _snapshot(view, store, profile, *, mode="metadata"):
+def _snapshot(view, store, profile, *, mode="metadata", scope=None):
     return {
         "schema": SCHEMA,
-        "schema_version": 1,
+        "schema_version": 2,
         "snapshot_id": "album_snapshot_" + uuid4().hex,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "album": store.album(),
         "view": view,
         "mode": mode,
+        "scope": deepcopy(scope) if scope is not None else {"kind": "album"},
         "component": "image_embedding",
         "profile_id": fingerprint(profile) if profile else None,
         "embedding_configuration": "configured" if profile else "not_configured",
@@ -70,8 +68,10 @@ def _snapshot(view, store, profile, *, mode="metadata"):
 
 def validate_snapshot_album(snapshot, store):
     if (not isinstance(snapshot, dict) or snapshot.get("schema") != SCHEMA
+            or type(snapshot.get("schema_version")) is not int or snapshot["schema_version"] != 2
             or snapshot.get("mode") not in ("metadata", "semantic")):
-        raise PhotographyError("INVALID_ARGUMENT", "Expected an album-snapshot-v1 snapshot.")
+        raise PhotographyError("INVALID_ARGUMENT", "Expected an album-snapshot-v2 snapshot.")
+    snapshot_scope(snapshot)
     album = snapshot.get("album")
     try:
         snapshot_id = UUID(album["id"])
@@ -84,6 +84,35 @@ def validate_snapshot_album(snapshot, store):
     return current
 
 
+def snapshot_scope(snapshot):
+    """Validate historical scope without consulting today's folder memberships."""
+    scope = snapshot.get("scope")
+    if not isinstance(scope, dict):
+        raise PhotographyError("INVALID_ARGUMENT", "Snapshots must identify their search scope.")
+    if scope.get("kind") == "album":
+        if "folders" in scope or "match" in scope:
+            raise PhotographyError("INVALID_ARGUMENT", "An album scope must not also select virtual folders.")
+        return {"kind": "album"}
+    if (scope.get("kind") != "virtual_folders" or scope.get("match") not in ("union", "intersection")
+            or not isinstance(scope.get("folders"), list) or not scope["folders"]):
+        raise PhotographyError("INVALID_ARGUMENT", "Invalid virtual-folder snapshot scope.")
+    folders = []
+    previous = None
+    for folder in scope["folders"]:
+        if (not isinstance(folder, dict)
+                or any(not isinstance(folder.get(key), str) or not folder[key].strip()
+                       for key in ("folder_id", "name"))
+                or previous is not None and folder["folder_id"] <= previous):
+            raise PhotographyError("INVALID_ARGUMENT", "Snapshot folders must have unique, ordered IDs and names.")
+        folders.append({key: folder[key] for key in ("folder_id", "name")})
+        previous = folder["folder_id"]
+    return {"kind": "virtual_folders", "match": scope["match"], "folders": folders}
+
+
+def _coverage_scope(scope):
+    return "entire_album" if scope["kind"] == "album" else "selected_folders"
+
+
 def _search_candidates(snapshot, store):
     validate_snapshot_album(snapshot, store)
     try:
@@ -91,9 +120,10 @@ def _search_candidates(snapshot, store):
     except (ValueError, TypeError) as exc:
         raise PhotographyError("INVALID_ARGUMENT", "Search snapshots must contain finite JSON values.") from exc
     if (snapshot["mode"] != "semantic" or snapshot.get("view") != "search"
-            or type(snapshot.get("schema_version")) is not int or snapshot["schema_version"] != 1
             or snapshot.get("component") != "image_embedding"
-            or snapshot.get("display_stage", "candidates") != "candidates"
+            or snapshot.get("display_stage") != "candidates"
+            or snapshot.get("selection_evidence") != "embedding_similarity_only"
+            or snapshot.get("coverage_scope") != _coverage_scope(snapshot_scope(snapshot))
             or not isinstance(snapshot.get("snapshot_id"), str) or not snapshot["snapshot_id"]
             or not isinstance(snapshot.get("profile_id"), str) or not snapshot["profile_id"]
             or not isinstance(snapshot.get("results"), list)):
@@ -104,7 +134,7 @@ def _search_candidates(snapshot, store):
     if (not isinstance(coverage, dict)
             or any(type(coverage.get(key)) is not int or coverage[key] < 0 for key in (*STATUSES, "total"))
             or sum(coverage[key] for key in STATUSES) != coverage["total"]
-            or len(snapshot["results"]) > min(snapshot["limit"], coverage["ready"])):
+            or len(snapshot["results"]) != min(snapshot["limit"], coverage["ready"])):
         raise PhotographyError("INVALID_ARGUMENT", "Search snapshot coverage or candidate count is invalid.")
     seen = set()
     previous = None
@@ -122,6 +152,18 @@ def _search_candidates(snapshot, store):
         if previous is not None and order < previous:
             raise PhotographyError("INVALID_ARGUMENT", "Candidate order does not match the saved similarity ranking.")
         previous = order
+    for rank, item in enumerate(snapshot["results"], 1):
+        gap = item.get("score_gap_to_next")
+        best_gap = item.get("score_gap_from_best")
+        if (type(item.get("candidate_rank")) is not int or item["candidate_rank"] != rank
+                or type(best_gap) not in (int, float) or not math.isfinite(best_gap)
+                or not math.isclose(best_gap, snapshot["results"][0]["score"] - item["score"], abs_tol=1e-12)
+                or (rank == coverage["ready"] and gap is not None)
+                or (rank < coverage["ready"] and (
+                    type(gap) not in (int, float) or not math.isfinite(gap) or not 0 <= gap <= 2))
+                or (rank < len(snapshot["results"]) and not math.isclose(
+                    gap, item["score"] - snapshot["results"][rank]["score"], abs_tol=1e-12))):
+            raise PhotographyError("INVALID_ARGUMENT", "Candidate ranks or score gaps are inconsistent.")
     return snapshot["results"]
 
 
@@ -149,18 +191,18 @@ def select_search_results(snapshot, photo_ids, *, store):
             raise PhotographyError("INVALID_ARGUMENT", "Only IDs from the saved search candidates may be displayed.")
         profile = store.embedding_profile(snapshot["profile_id"])
         results = []
-        for rank, item in enumerate(candidates, 1):
+        for item in candidates:
             if item["photo_id"] in selected:
                 _check_candidate(item, store, profile)
                 result = {key: item[key] for key in (
-                    "photo_id", "result_id", "profile_id", "content_version", "thumbnail_profile", "input_image_hash", "score")}
-                result.update(candidate_rank=rank, score_gap_from_best=candidates[0]["score"] - item["score"],
-                              score_gap_to_next=item["score"] - candidates[rank]["score"] if rank < len(candidates) else None)
+                    "photo_id", "result_id", "profile_id", "content_version", "thumbnail_profile", "input_image_hash",
+                    "score", "candidate_rank", "score_gap_from_best", "score_gap_to_next")}
                 results.append(result)
-        output = _snapshot("search", store, profile, mode="semantic")
+        scope = snapshot_scope(snapshot)
+        output = _snapshot("search", store, profile, mode="semantic", scope=scope)
         output.update(query=snapshot["query"], limit=snapshot["limit"],
                       coverage={key: snapshot["coverage"][key] for key in (*STATUSES, "total")},
-                      coverage_scope="entire_album", similarity="cosine_not_probability",
+                      coverage_scope=_coverage_scope(scope), similarity="cosine_not_probability",
                       selection_evidence="embedding_similarity_only", display_stage="selected", results=results,
                       source_search={"snapshot_id": snapshot["snapshot_id"]},
                       selection={"method": "explicit_candidate_ids", "candidate_count": len(candidates),
@@ -218,19 +260,19 @@ def album_info(*, store, view="open", profile_id=None):
         coverage = (embedding_status(members, store, profile)["counts"] if profile else
                     {"total": len(members), "not_configured": len(members)})
         result.update(photo_count=len(members), coverage=coverage, coverage_scope="entire_album",
-                      items=[], total=len(members), next_cursor=None)
+                      folder_count=len(store.folders()), items=[], total=len(members), next_cursor=None)
         result["album"]["photo_count"] = len(members)
     return result
 
 
-def photos(*, store, limit=100, after="", profile_id=None):
+def photos(*, store, limit=100, after="", profile_id=None, folder_ids=None, folder_match=None):
     _limit(limit)
     _cursor(after)
     with store.read_snapshot():
         profile = _profile(store, profile_id)
-        members = store.photos()
+        scope, members = resolve_scope(store=store, folder_ids=folder_ids, folder_match=folder_match)
         selected, cursor = _page(members, limit, after)
-        result = _snapshot("photos", store, profile)
+        result = _snapshot("photos", store, profile, scope=scope)
         result.update(items=[_photo_item(item, store, profile) for item in selected],
                       total=len(members), limit=limit, after=after, next_cursor=cursor)
     return result
@@ -241,30 +283,36 @@ def photo(photo_id, *, store, profile_id=None):
         record = store.photo(photo_id)
         profile = _profile(store, profile_id)
         result = _snapshot("photo", store, profile)
-        result.update(items=[_photo_item(record, store, profile)], total=1, next_cursor=None)
+        item = _photo_item(record, store, profile)
+        item["virtual_folders"] = [{key: folder[key] for key in ("folder_id", "name")}
+                                   for folder in store.photo_folders(photo_id)]
+        result.update(items=[item], total=1, next_cursor=None)
     return result
 
 
-def metadata_search(query, *, store, limit=100, after="", profile_id=None):
+def metadata_search(query, *, store, limit=100, after="", profile_id=None,
+                    folder_ids=None, folder_match=None):
     _query(query)
     _limit(limit)
     _cursor(after)
-    needle = _fold(query)
+    needle = fold_text(query)
     with store.read_snapshot():
         profile = _profile(store, profile_id)
-        candidates = store.photos()
-        matches = [item for item in candidates if any(needle in _fold(text or "") for text in (
+        scope, candidates = resolve_scope(store=store, folder_ids=folder_ids, folder_match=folder_match)
+        matches = [item for item in candidates if any(needle in fold_text(text or "") for text in (
             photo_filename(item), item["original_absolute_path"], item["original_relative_path"]
         ))]
         selected, cursor = _page(matches, limit, after)
-        result = _snapshot("search", store, profile)
+        result = _snapshot("search", store, profile, scope=scope)
         result.update(query=query, items=[_photo_item(item, store, profile) for item in selected],
-                      total=len(matches), album_total=len(candidates),
+                      total=len(matches), scope_total=len(candidates),
+                      album_total=len(candidates) if scope["kind"] == "album" else len(store.photos()),
                       limit=limit, after=after, next_cursor=cursor)
     return result
 
 
-def semantic_search(query, *, store, config=None, profile_id=None, limit=10, after=None, encoder=None):
+def semantic_search(query, *, store, config=None, profile_id=None, limit=10, after=None, encoder=None,
+                    folder_ids=None, folder_match=None):
     _query(query)
     _limit(limit)
     if after is not None:
@@ -273,7 +321,8 @@ def semantic_search(query, *, store, config=None, profile_id=None, limit=10, aft
 
     with store.read_snapshot():
         profile = _profile(store, profile_id, required=True)
-        members = sorted(store.photos(), key=lambda item: item["photo_id"])
+        scope, members = resolve_scope(store=store, folder_ids=folder_ids, folder_match=folder_match)
+        members = sorted(members, key=lambda item: item["photo_id"])
         counts = {status: 0 for status in STATUSES}
         counts["total"] = len(members)
         candidates = []
@@ -287,9 +336,9 @@ def semantic_search(query, *, store, config=None, profile_id=None, limit=10, aft
                     "result_id", "profile_id", "content_version", "thumbnail_profile", "input_image_hash"
                 )}}
                 candidates.append((candidate, vector))
-        result = _snapshot("search", store, profile, mode="semantic")
+        result = _snapshot("search", store, profile, mode="semantic", scope=scope)
         result.update(query=query, coverage=counts, coverage_items=entries,
-                      coverage_scope="entire_album", limit=limit, results=[],
+                      coverage_scope=_coverage_scope(scope), limit=limit, results=[],
                       display_stage="candidates",
                       selection_evidence="embedding_similarity_only",
                       next_cursor=None, similarity="cosine_not_probability",

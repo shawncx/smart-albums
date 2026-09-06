@@ -1,6 +1,6 @@
-# management: album lifecycle, browsing, search and path maintenance
+# management: manual folders, scoped search and album maintenance
 
-Management is one of the three public Skill capabilities. **Plain browse/search is read-only**; creating an album file, explicitly locating/relinking originals and writing chosen exports/backups are separate operations. Management does not generate image embeddings, install models, manipulate internal album memberships or offer automatic selection/curation.
+Management is one of the three public Skill capabilities. **Plain browse/search is read-only**; album creation, manual virtual folder writes, explicit original/relink and exports/backups are separate operations. Management does not generate image embeddings, install models, create internal albums or offer automatic regrouping/curation.
 
 ## Commands
 
@@ -28,7 +28,9 @@ management scan-events <scan-id> [--limit N] [--after <event-id>] [--changes-onl
 management show-results <candidates.json> --ids-file <selected.json> [--html <results.html>] [--output <displayed.json>]
 ```
 
-Only the view commands **create/open/photos/photo/search** also accept:
+`photos` and both `search` modes also accept repeatable `--folder-id <id>` and `--folder-match union|intersection`; see [folder scope](#folder-scope-for-browse-and-both-search-modes).
+
+The album/photo view commands **create/open/photos/photo/search** share these options; folder commands have their own options below:
 
 - `--profile-id <id>` to inspect/search an explicit registered profile rather than the saved default.
 - `--output <output-directory>\snapshot.json` for a UTF-8 JSON snapshot.
@@ -44,9 +46,53 @@ There is no `--target`, internal album/library scope, `--model-dir`, `--state-di
 
 Start with [album-file selection](library.md). `create` requires explicit permission and a new path in an existing directory; it never overwrites. `open` validates an existing file read-only and returns the album's stable UUID, filename-derived name, absolute database path, photo count and embedding coverage. It does not create a file, perform DDL, migrate or retain a background connection.
 
-New albums use schema 8/application ID `0x53414C42`, with 11 tables and no internal albums. Old v1–v7 files are rejected unchanged. Do not use a missing/old database as permission to create a replacement or modify the user's old database/backups.
+New albums use schema 9/application ID `0x53414C42`, with 13 tables and no internal albums. Old v1–v8 files are rejected unchanged, with no migration. The added tables are `virtual_folders(folder_id, name, name_key, description, created_at, updated_at)` and `virtual_folder_photos(folder_id, photo_id, added_at)`. Do not use a missing/old database as permission to create a replacement or modify the user's old database/backups.
 
-`management backup --output <new-file>` creates a consistent SQLite snapshot using SQLite's backup API. Existing destinations are refused. It preserves album UUID/data, including previews/embeddings/runs, but not external originals, weights or runtimes. Use one device writer; stop all operations before moving/copying/cloud-syncing the local file. Backup copies are not concurrent branches with automatic merge.
+`management backup --output <new-file>` creates a consistent SQLite snapshot using SQLite's backup API. Existing destinations are refused. It preserves album UUID/data, including previews/embeddings/runs and folder memberships, but not external originals, weights or runtimes. Use one device writer; stop all operations before moving/copying/cloud-syncing the local file. Backup copies are not concurrent branches with automatic merge.
+
+## Manual custom virtual folders: primary workflow
+
+Virtual folders are static, flat many-to-many collections in one SQLite album, not disk directories or another album. Manual CRUD/add/remove is primary and needs no index, model or default profile. Empty custom folders are supported; each photo can belong to many folders or none.
+
+```text
+management folders list [--query <name>] [--limit N] [--after <folder-id>]
+management folders create --name <name> [--description <text>]
+management folders show <folder-id> [--profile-id <profile-id>]
+management folders rename <folder-id> --name <new-name>
+management folders delete <folder-id>
+management folders add <folder-id> --ids-file <photo-ids.json> [--search-snapshot <candidates.json>]
+management folders remove <folder-id> --ids-file <photo-ids.json>
+```
+
+Names are trimmed, nonempty and control-character-free, unique by NFC + casefold `name_key` within the album. They are text, not paths. Rename preserves the stable `folder_id`. Lists use literal normalized name substrings, stable folder-ID pagination (default 100, range 1–1000) and member counts. `show` reports the folder and saved coverage; no model is loaded, and a supplied profile must be valid. Browse members with `management photos --folder-id <id>`; `management photo <id>` includes its folders.
+
+The Skill resolves actual IDs from the selected album and writes a JSON array for add/remove, including a one-element array for one photo. `[]` means zero changes, never all photos. Validate the folder and every photo before any write; invalid IDs roll back the whole batch. Duplicate IDs are deduplicated; repeated add or removing a valid nonmember reports unchanged counts. Create/rename/delete/add/remove explicitly open a writer and commit atomically; list/show remain read-only.
+
+Removing membership or deleting a folder never deletes photo records, originals, thumbnails or embeddings and never removes memberships in other folders. Members bind stable photo IDs: content/path/profile changes do not regroup them. No hierarchy, cross-album folders, folder-specific embeddings, jobs or live rules are added.
+
+## Optional one-time organization
+
+### Add explicitly selected search results
+
+Choose the user's destination folder, creating their custom name if needed. For semantic candidates use:
+
+```text
+management folders add <folder-id> --ids-file <selected.json> --search-snapshot <candidates.json>
+```
+
+`--search-snapshot` reuses `management.select_search_results` to validate album, candidate identity, selected subset and current selected photo/input/result identities in the membership transaction. It does not repeat the query, encode images or inspect their content. Selection still uses embedding-derived numbers only; do not automatically add all top-K, remove source memberships or treat folder labels as semantic evidence. Source scope/names remain historical even if source folders later change or disappear; selected photo identity changes are still stale errors.
+
+### Plan and confirm EXIF date organization
+
+```text
+management folders organize-date --all --granularity year|month|day --output <date-plan.json>
+management folders organize-date --ids-file <photo-ids.json> --granularity year|month|day --output <date-plan.json>
+management folders apply-date-plan <date-plan.json> --confirm <digest>
+```
+
+Planning requires exactly one of `--all` or `--ids-file`, independent of browse pagination/top-K; an empty ID array is an empty scope. It reads saved EXIF `datetime_original` only, requiring a valid calendar date in camera-local time with no UTC conversion. It produces flat `YYYY`, `YYYY-MM` or `YYYY-MM-DD` names. Missing/invalid dates and unavailable ingestion metadata are skipped with counts; no fallback to modification time, other date fields or original-file reads. This authorized deterministic operation is not semantic evidence and needs no index/model.
+
+Planning is read-only. CLI JSON wraps `plan`, `digest`, `output`, `album`, `model_calls: 0` (and `image_model_calls: 0`); the output file contains the raw plan, not this envelope. Review its exact scope, member IDs, create/reuse preview, skips and digest; the digest itself is not consent. Apply only the approved plan. It revalidates album, saved inputs and target identities/names, reports conflicts/staleness explicitly, and atomically creates/reuses folders and adds members. No partial writes, jobs/new tables, live rules or replacement of other manual members. Later imports or manually removed photos are never automatically regrouped. Plan exports use existing output protection and cannot overwrite their ID input file.
 
 ## Browse saved photos
 
@@ -54,7 +100,21 @@ New albums use schema 8/application ID `0x53414C42`, with 11 tables and no inter
 
 Records expose both `original_absolute_path` and nullable `original_relative_path`, plus separate `ingest_state` and `original_status`. Original verification is `not_checked`, regardless of stored availability. Saved previews remain browsable while originals are offline. JSON metadata inspection does not decode every JPEG BLOB; HTML/thumbnail export validates the previews it uses and reports corrupt/changed inputs.
 
-`photos` and metadata search sort by stable photo ID, default limit 100, range 1–1000. Follow non-null `next_cursor` with `--after` and retain the album/query/profile. Pages are not a durable multi-page transaction; re-query after changes.
+`photos` and metadata search sort by stable photo ID, default limit 100, range 1–1000. Follow non-null `next_cursor` with `--after` and retain the album/query/profile and folder scope. Pages are not a durable multi-page transaction; re-query after changes.
+
+## Folder scope for browse and both search modes
+
+```text
+management photos --folder-id <a>
+management search "IMG" --mode metadata --folder-id <a> --folder-id <b> --folder-match union
+management search "trees" --mode semantic --folder-id <a> --folder-id <b> --folder-match intersection
+```
+
+Multiple distinct IDs require explicit `--folder-match union|intersection`; repeated copies of one ID are one folder. No folder IDs means the entire album. Invalid folders are errors, never whole-album fallback. Empty folders/intersections yield empty results without loading an encoder; semantic search still requires a valid explicit/configured profile.
+
+Resolve and filter scope before vector inspection, ranking and top-K. Union members are deduplicated. Counts, coverage, cursor pages and score gaps belong to the selected scope; filtering a whole-album top-K afterward is incorrect. Metadata `album_total` remains the actual whole-album count, alongside `scope_total` and query-match counts.
+
+`scope` is `{"kind":"album"}` or `{"kind":"virtual_folders","match":"union","folders":[{"folder_id":"...","name":"..."}]}` (`intersection` is also valid). `coverage_scope` is `entire_album` or `selected_folders`. Folder names are scope labels, never semantic evidence.
 
 ## Metadata search
 
@@ -81,11 +141,11 @@ Image and query encoders must share the **same immutable profile**, not just dim
 
 Queries use the matching tokenizer/text feature interface directly, without translation or retired retrieval prefixes. The limit is 64 tokens including EOS; overlong queries produce `QUERY_TOO_LONG`, not silent truncation.
 
-A consistent saved-data snapshot supplies current photo/preview identities and vectors. Invalid/stale/absent results are excluded and reported; semantic ranking checks saved input metadata and vector integrity, not original files or all preview JPEG bytes. Optional HTML rendering validates its embedded previews separately.
+A consistent saved-data snapshot supplies current photo/preview identities and vectors within the resolved folder/album scope. Invalid/stale/absent results are excluded and reported; semantic ranking checks saved input metadata and vector integrity, not original files or all preview JPEG bytes. Optional HTML rendering validates its embedded previews separately.
 
 With no eligible candidates, search returns empty results and coverage without loading a model. Otherwise it encodes the query once and ranks locally by exact cosine similarity. It never regenerates image vectors, mixes profiles, changes defaults, installs/downloads weights or falls back to a cloud service.
 
-Semantic search defaults to top 10, accepts 1–1000 and **rejects `--after`**. Results sort by descending similarity, then photo ID. Coverage includes the **entire album**, not only top-K: distinguish `ready`, `missing`, `stale`, `invalid_input` and `invalid_vector` from old task failures and source availability. Incomplete coverage must not be described as searching every photo.
+Semantic search defaults to top 10, accepts 1–1000 and **rejects `--after`**. Results sort by descending similarity, then photo ID. Coverage includes the **entire selected scope**, not only top-K: distinguish `ready`, `missing`, `stale`, `invalid_input` and `invalid_vector` from old task failures and source availability. Incomplete coverage must not be described as searching every photo.
 
 Semantic result rows deliberately omit photo metadata, filenames, paths and thumbnail payloads. They carry record/input identities plus `score`, `candidate_rank`, `score_gap_from_best` and `score_gap_to_next`. The latter is the gap to the next ranked valid candidate, which may be outside the returned top-K; `null` means there is no next ranked candidate. These are embedding-derived numbers, not object labels or probabilities. `display_stage: candidates` marks the raw retrieval output and `selection_evidence: embedding_similarity_only` describes the selection policy.
 
@@ -100,7 +160,7 @@ management search "有人物的照片" --mode semantic --output <candidates.json
 management show-results <candidates.json> --ids-file <selected.json> --html <results.html> --output <displayed.json>
 ```
 
-`selected.json` is an array of photo IDs from that exact snapshot. Unknown IDs, malformed candidates, another album or stale selected input/result identities are errors. Duplicates are deduplicated; original candidate order and scores are retained. The output records the source snapshot ID and selected/candidate counts. It does not forward arbitrary input fields or image payloads, write the database, or call an encoder. Its selection method is `explicit_candidate_ids`, not an automatic classifier.
+`selected.json` is an array of photo IDs from that exact snapshot. Unknown IDs, malformed candidates, another album or stale selected input/result identities are errors. Duplicates are deduplicated; original candidate order, validated saved scores, ranks and score gaps are retained verbatim, including a gap to the next candidate outside returned top-K. Gaps are not recomputed from the selected subset. The output records the source snapshot ID and selected/candidate counts. Candidates, `show-results` and reports preserve historical scope and names after folder rename/deletion or membership changes; they do not re-query current membership. It does not forward arbitrary input fields or image payloads, write the database, or call an encoder. Its selection method is `explicit_candidate_ids`, not an automatic classifier.
 
 An empty selection produces an empty report scoped to the retrieved candidates. It does not prove no match exists among photos outside top-K or without indexes. Selected JSON remains numeric/identity-only. Local HTML rendering can read matching SQLite previews and names **for the user's display**; the agent must return the file link without reading/attaching those images. Raw `search --html` remains an explicitly labeled, unfiltered diagnostic, not the default Skill flow. Input candidate/selection files cannot be overwritten by the selected-result export.
 
@@ -132,10 +192,10 @@ Path-only operations preserve photo ID, content version, metadata, previews and 
 
 ## Snapshot and output safety
 
-Views use **`album-snapshot-v1`**, with schema/version, album UUID/path, mode and selected profile identity. Browse/metadata records use `items`; semantic rankings use `results` with result/profile IDs, input identity and scores. A snapshot is not live state, and image-embedding readiness does not mean future technical components are complete.
+Views use **`album-snapshot-v2`**, with schema/version, album UUID/path, mode, explicit scope/coverage scope and selected profile identity. Browse/metadata records use `items`; semantic rankings use `results` with result/profile IDs, input identity and scores. A snapshot is not live state, and image-embedding readiness does not mean future technical components are complete.
 
 Exports protect the database, journal/WAL/shared-memory/execution-lock sidecars, model cache and recorded original paths. There is no blanket prohibition on the database parent directory. JPEG preview exports must additionally stay outside saved scan source directories. Choose dedicated output files; a normal report/preview export is not a no-overwrite backup command.
 
 HTML escapes data, embeds validated previews and binds them to the snapshot's album/input identities. Changed/missing/corrupt previews display errors instead of substitute images. No original access is required. There are no selection checkboxes, membership controls, live server or retained `search-add` protocol.
 
-The portable code is implemented, but consolidated regression acceptance is pending. No new-format real-model trial was performed; previous v7 results and synthetic tests do not establish new-format quality, memory, timing or cross-host runtime support.
+The folder offline regression suite has passed; see [validation status](../../docs/TODO.md) for its scope. No new-format real-model trial was performed; previous v7 results and synthetic tests do not establish new-format quality, memory, timing or cross-host runtime support.

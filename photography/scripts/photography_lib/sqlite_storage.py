@@ -13,6 +13,7 @@ from uuid import UUID, uuid4
 from .config import Config, PhotographyError
 from .image_embedding_storage import IMAGE_EMBEDDING_SCHEMA, IMAGE_EMBEDDING_TABLES, ImageEmbeddingStorage
 from .thumbnails import validate_preview
+from .virtual_folder_storage import VIRTUAL_FOLDER_SCHEMA, VIRTUAL_FOLDER_TABLES, VirtualFolderStorage
 
 
 def now() -> str:
@@ -20,7 +21,7 @@ def now() -> str:
 
 
 APPLICATION_ID = 0x53414C42
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 SCHEMA = (
     """CREATE TABLE album_metadata (
@@ -91,6 +92,8 @@ REQUIRED_COLUMNS = {
         "run_id", "created_at",
     },
     "image_embedding_settings": {"setting_key", "profile_id"},
+    "virtual_folders": {"folder_id", "name", "name_key", "description", "created_at", "updated_at"},
+    "virtual_folder_photos": {"folder_id", "photo_id", "added_at"},
 }
 
 PHOTO_REQUIRED_FIELDS = (
@@ -142,7 +145,7 @@ def _publish_new(temporary: Path, destination: Path) -> None:
         raise PhotographyError("DATABASE_EXISTS", f"Destination appeared during creation and was not overwritten: {destination}") from exc
 
 
-class SQLiteStorage(ImageEmbeddingStorage):
+class SQLiteStorage(ImageEmbeddingStorage, VirtualFolderStorage):
     def __init__(self, *args, **kwargs):
         raise PhotographyError("STORAGE_OPEN_REQUIRED", "Use SQLiteStorage.create(path) or SQLiteStorage.open(path).")
 
@@ -176,7 +179,7 @@ class SQLiteStorage(ImageEmbeddingStorage):
             with store.transaction():
                 store.db.execute(f"PRAGMA application_id={APPLICATION_ID}")
                 store.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-                for statement in (*SCHEMA, *IMAGE_EMBEDDING_SCHEMA):
+                for statement in (*SCHEMA, *IMAGE_EMBEDDING_SCHEMA, *VIRTUAL_FOLDER_SCHEMA):
                     store.db.execute(statement)
                 store.db.execute("INSERT INTO album_metadata VALUES (1,?,?)", (str(uuid4()), now()))
                 store._validate_format()
@@ -235,7 +238,10 @@ class SQLiteStorage(ImageEmbeddingStorage):
             raise PhotographyError("SCHEMA_UNSUPPORTED", f"Unsupported album schema version: {version}.")
         tables = {row[0] for row in self.db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-        expected = {"album_metadata", "photos", "thumbnails", "scans", "scan_events", *IMAGE_EMBEDDING_TABLES}
+        expected = {
+            "album_metadata", "photos", "thumbnails", "scans", "scan_events",
+            *IMAGE_EMBEDDING_TABLES, *VIRTUAL_FOLDER_TABLES,
+        }
         if tables != expected:
             raise PhotographyError("SCHEMA_INVALID",
                 f"Invalid album tables (missing: {sorted(expected - tables)}; unexpected: {sorted(tables - expected)}).")

@@ -6,13 +6,13 @@
 | --- | --- |
 | **ingestion** | Import local photo metadata, original paths and proportional JPEG previews into the selected album. |
 | **index** | Explicitly set up/configure, plan, generate/reuse, inspect and resume local image embeddings. |
-| **management** | Create/open/backup the album file, browse/search photos, export previews and explicitly locate/relink originals. |
+| **management** | Create/open/backup the album file, manually manage static virtual folders, browse/search within explicit scopes, organize by saved date and locate/relink originals. |
 
-These are not an automatic pipeline. Ingestion never calls a model. Browse/search never writes the database or checks original files; creation and original-path maintenance are explicit management operations. The program never deletes originals.
+These are not an automatic pipeline. Ingestion never calls a model. Browse/search never writes the database or checks original files; creation, folder membership and original-path maintenance are explicit management operations. The program never deletes originals or automatically regroups folders.
 
 ## Install the base Skill
 
-Use a compatible Python 3.12+ interpreter in a project virtual environment. Base ingestion, browsing and metadata search need only [requirements.txt](photography/requirements.txt), not PyTorch or model weights. From the repository root on Windows:
+Use a compatible Python 3.12+ interpreter in a project virtual environment. Base ingestion, browsing, metadata search, manual folders and date organization need only [requirements.txt](photography/requirements.txt), not PyTorch or model weights. From the repository root on Windows:
 
 ```text
 python -m venv .venv
@@ -36,7 +36,7 @@ python photography\scripts\photography.py --database <absolute-album.sqlite> man
 python photography\scripts\photography.py --database <absolute-album.sqlite> management open
 ```
 
-Use `create` only for an explicitly requested, unused destination in an existing directory. It never overwrites. `open` validates an existing file read-only: no creation, DDL or migration. A missing/invalid/old file is an error, not permission to create a replacement. Responses identify the album by UUID, filename-derived display name and full database path. Switching files resets prior photo/profile/run selections and pending confirmations. See [album-file entry](photography/references/library.md).
+Use `create` only for an explicitly requested, unused destination in an existing directory. It never overwrites. `open` validates an existing file read-only: no creation, DDL or migration. A missing/invalid/old file is an error, not permission to create a replacement. Responses identify the album by UUID, filename-derived display name and full database path. Switching files resets prior photo/profile/run/folder selections and pending confirmations. See [album-file entry](photography/references/library.md).
 
 ## ingestion: import without inference
 
@@ -48,7 +48,7 @@ Saved previews preserve aspect ratio: default longest edge 1024, JPEG quality 85
 
 After import, the Skill explains the returned `index_prompt` and explicitly asks, **in the user's language**, whether to prepare an index for its exact successful, not-ready photo IDs:
 
-- **Without an index:** browse photos, saved previews and basic metadata; find filenames/recorded paths.
+- **Without an index:** browse photos, saved previews and basic metadata; find filenames/recorded paths and folder names; create/manage custom folders, manually add/remove photos and prepare/apply confirmed EXIF date organization.
 - **With a valid index and matching local model:** also search visible content in Chinese or English. Results are similar candidates, not guaranteed detections or exact filters.
 
 Fully indexed repeat scans do not prompt again. Importing, accepting the invitation or choosing an album never automatically downloads a model or authorizes an unseen execution plan. See [ingestion](photography/references/ingest.md).
@@ -76,10 +76,29 @@ The persisted product is a **768-dimensional, whole-image semantic image vector 
 
 `index resume <run-id>` reuses existing inference approval. If the saved status is `running`, it additionally requires `--confirm-stopped` after confirming workers on **all devices** have stopped. This flag cannot steal a live OS lock. Cache-only work loads no model and cannot expand into encoding. See [index reference](photography/references/index.md).
 
-## management: browse, search and explicit maintenance
+## management: manual folders, scoped search and maintenance
+
+### Manual custom folders are the primary workflow
+
+A virtual folder is a static, flat many-to-many collection inside one SQLite album, not a disk directory or another album. Create empty custom folders and add one or more photos without an index:
+
+```text
+python photography\scripts\photography.py --database <absolute-album.sqlite> management folders list --query "精选"
+python photography\scripts\photography.py --database <absolute-album.sqlite> management folders create --name "精选" --description "My picks"
+python photography\scripts\photography.py --database <absolute-album.sqlite> management folders show <folder-id>
+python photography\scripts\photography.py --database <absolute-album.sqlite> management folders add <folder-id> --ids-file <photo-ids.json>
+python photography\scripts\photography.py --database <absolute-album.sqlite> management folders remove <folder-id> --ids-file <photo-ids.json>
+python photography\scripts\photography.py --database <absolute-album.sqlite> management folders rename <folder-id> --name "旅行精选"
+python photography\scripts\photography.py --database <absolute-album.sqlite> management folders delete <folder-id>
+```
+
+For one photo, the Skill writes a one-element JSON ID array using its actual ID. `[]` means no changes, never all photos. Names are trimmed, nonempty and control-character-free, unique by NFC + casefold; rename preserves the stable folder ID. A photo may belong to several folders or none. Removing membership/deleting a folder never deletes photos, originals, previews or embeddings, or affects other memberships. Batches validate all IDs and commit atomically; duplicates/unchanged members are reported. `photo` includes memberships; folder lists show counts. No hierarchy, live rules, jobs or fourth capability is added.
+
+### Browse and search
 
 ```text
 python photography\scripts\photography.py --database <absolute-album.sqlite> management photos --limit 100
+python photography\scripts\photography.py --database <absolute-album.sqlite> management photos --folder-id <folder-id>
 python photography\scripts\photography.py --database <absolute-album.sqlite> management photo <photo-id>
 python photography\scripts\photography.py --database <absolute-album.sqlite> management search "IMG_01" --mode metadata
 python photography\scripts\photography.py --database <absolute-album.sqlite> management search "黑白的枯树" --mode semantic --output <output-directory>\candidates.json
@@ -91,15 +110,28 @@ python photography\scripts\photography.py --database <absolute-album.sqlite> man
 
 Metadata mode uses Unicode NFC/casefold literal substrings in filenames and recorded absolute/relative paths; no model/default is needed. Semantic mode uses the selected album's current vectors and a matching query encoder, without generating missing embeddings or mixing profiles. Empty candidates load no model. Report incomplete coverage; cosine scores are not probabilities or guaranteed matches.
 
+`photos` and both search modes accept repeatable `--folder-id` plus `--folder-match union|intersection`, required for multiple distinct IDs. No IDs means the entire album; invalid folders are errors, never whole-album fallback. Empty folders/intersections return empty results without loading an encoder (semantic search still requires a valid selected/configured profile). Scope filtering happens before vector inspection, ranking and top-K; unions deduplicate. Counts, pagination, coverage and score gaps describe that scope; metadata `album_total` remains the actual whole count alongside `scope_total`.
+
 By default, the Skill treats semantic results as internal candidates and selects which IDs to display using **embedding similarity scores, ranks and score gaps only**. Images and thumbnails are not passed to the agent, and selection is not visual verification. It may select fewer results or none instead of always returning the whole candidate list.
 
 ```text
 python photography\scripts\photography.py --database <absolute-album.sqlite> management show-results <output-directory>\candidates.json --ids-file <output-directory>\selected.json --html <output-directory>\results.html
 ```
 
-The selected ID file may contain `[]`. This helper does not repeat a query or modify the album. It validates the captured scope, preserves scores/ranks and creates a report with only the selected photos for the user; the agent returns its link without inspecting its images. The original candidates remain available as diagnostics.
+The selected ID file may contain `[]`. This helper does not repeat a query or modify the album. `album-snapshot-v2` candidates, selected results and reports preserve historical scope and folder names even after membership changes or folder rename/deletion; changed selected photo/input identities still error as stale. Scope is `{"kind":"album"}` or `{"kind":"virtual_folders","match":"union","folders":[{"folder_id":"...","name":"..."}]}` (also `intersection`), with `coverage_scope: entire_album|selected_folders`. The report preserves validated saved scores/ranks/gaps verbatim, including the next-candidate gap beyond returned top-K, and displays only selected photos for the user; the agent returns its link without reading image payloads. Folder labels only identify scope, not semantic evidence.
 
 Both modes and plain browsing are read-only and do not stat originals or repair paths. HTML/JSON are snapshots, with no selection widgets, album membership writes or live service. `management thumbnail`, `scan` and `scan-events` retain preview export and ingestion diagnostics. See [management](photography/references/management.md) and [search](photography/references/search.md).
+
+### Optional one-time organization
+
+For an explicitly chosen destination, add selected semantic candidate IDs with `management folders add <folder-id> --ids-file <selected.json> --search-snapshot <candidates.json>`. This reuses `management.select_search_results` validation of album/candidate/selected identities without a new query or image encoding; never default to all top-K or remove source memberships.
+
+```text
+python photography\scripts\photography.py --database <absolute-album.sqlite> management folders organize-date --all --granularity month --output <date-plan.json>
+python photography\scripts\photography.py --database <absolute-album.sqlite> management folders apply-date-plan <date-plan.json> --confirm <digest>
+```
+
+Planning requires exactly `--all` or `--ids-file`; `--granularity` accepts `year|month|day`. It uses saved EXIF `datetime_original`, valid camera-local calendar dates with no UTC conversion or fallback to file times. Missing/invalid dates and unavailable ingestion metadata are skipped with counts, without originals/models. This is authorized deterministic organization, not semantic evidence. Review exact scope, create/reuse folder preview, members, skips and digest before applying. CLI output is an envelope (`plan`, `digest`, `output`, `album`, `model_calls: 0`); the file is the raw plan. Apply checks conflicts/staleness and atomically creates/reuses folders and adds members. No live rules, new jobs/tables or automatic regrouping of future imports/removals.
 
 ## Portable paths, cache and backups
 
@@ -109,15 +141,15 @@ Relink requires matching SHA-256 and updates both paths. Path-only repair preser
 
 Models are shared machine-local files, independent of albums: `Config.model_cache_root` defaults to `%LOCALAPPDATA%\SmartAlbums\models` on Windows or the platform's application cache elsewhere. Optional global `--model-cache-dir <cache-root>` precedes `index` or `management` and works consistently for setup, execution and semantic search. A known older model cache can be reused by explicitly selecting its root; it is not automatically moved or deleted.
 
-Use **one writer on one device at a time**. For cloud storage: download a complete local file, operate locally, stop/close all operations, then copy or sync it back. Do not copy an actively written bare SQLite file or delete its sidecars. `management backup --output <new-file>` makes a consistent no-overwrite SQLite snapshot containing previews and embeddings, **not originals, model weights or Python environments**. Each host needs its own compatible runtime/cache.
+Use **one writer on one device at a time**. For cloud storage: download a complete local file, operate locally, stop/close all operations, then copy or sync it back. Do not copy an actively written bare SQLite file or delete its sidecars. `management backup --output <new-file>` makes a consistent no-overwrite SQLite snapshot containing previews, embeddings and virtual folder memberships, **not originals, model weights or Python environments**. Each host needs its own compatible runtime/cache.
 
 ## Format and validation status
 
-New albums use **schema 8**, `application_id = 0x53414C42`, and exactly **11 tables**: `album_metadata`, `photos`, `thumbnails`, `scans`, `scan_events`, plus `image_embedding_profiles/results/runs/items/claims/settings`. There are no internal albums/libraries, legacy image-index/text-analysis tables or empty `technical_*` placeholders.
+New albums use **schema 9**, `application_id = 0x53414C42`, and exactly **13 tables**: `album_metadata`, `photos`, `thumbnails`, `scans`, `scan_events`, `image_embedding_profiles/results/runs/items/claims/settings`, `virtual_folders(folder_id, name, name_key, description, created_at, updated_at)` and `virtual_folder_photos(folder_id, photo_id, added_at)`. There are no internal albums/libraries, legacy image-index/text-analysis tables or empty `technical_*` placeholders.
 
-Existing v1–v7 databases are **rejected unchanged**: no automatic migration, cleanup, overwrite or old CLI/API compatibility. The user's old database and backups must remain untouched. Existing static reports are not converted into new album snapshots.
+Existing v1–v8 databases are **rejected unchanged**: no migration, cleanup, overwrite or old CLI/API compatibility. The user's old database and backups must remain untouched. Existing static reports are not converted into new album snapshots.
 
-The portable-album code is implemented; consolidated regression acceptance is still pending. **No real-model trial against the new format was performed in this implementation.** Earlier v7 measurements are not new-format acceptance. Synthetic tests cannot establish real retrieval quality, latency, memory or actual disconnected operation.
+The virtual-folder offline regression suite has passed; see [validation status](docs/TODO.md) for its scope. **No real-model trial against the new format was performed in this implementation.** Earlier v7 measurements are not new-format acceptance. Synthetic tests cannot establish real retrieval quality, latency, memory or actual disconnected operation.
 
 ```text
 python -m unittest discover -s tests -v

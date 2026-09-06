@@ -12,7 +12,6 @@ from .images import inspect_photo
 from .sqlite_storage import SQLiteStorage
 from .storage import Storage
 from .thumbnails import stored_preview
-from .status import analysis_status
 
 
 def _now():
@@ -82,8 +81,7 @@ def _process(path: Path, root: Path, library_id: str, old: dict | None, config: 
                  path_key=path_key(path.relative_to(root)), state="available",
                  content_version=details["content_hash"], thumbnail_id=photo_id,
                  thumbnail_profile=config.thumbnail_profile, last_error=None, missing_since=None,
-                 created_at=old["created_at"] if old else _now(), updated_at=_now(),
-                 needs_analysis=content_changed or not reusable or bool(old and old.get("needs_analysis", True)))
+                 created_at=old["created_at"] if old else _now(), updated_at=_now())
     photo.pop("thumbnail_path", None)
     if old is None:
         outcome = "added"
@@ -93,7 +91,8 @@ def _process(path: Path, root: Path, library_id: str, old: dict | None, config: 
         outcome = "updated"
     else:
         outcome = "unchanged"
-    return photo, outcome, outcome != "unchanged" and photo["needs_analysis"], thumbnail
+    input_changed = content_changed or not reusable or thumbnail is not None
+    return photo, outcome, outcome != "unchanged" and input_changed, thumbnail
 
 
 def _scan(root: Path, config: Config, storage: Storage, album_name=None) -> dict:
@@ -164,10 +163,22 @@ def _scan(root: Path, config: Config, storage: Storage, album_name=None) -> dict
             result["status"] = "partial" if result["failed"] else "completed"
         else:
             result.update(status="failed", error=fatal.to_dict())
-        summary = analysis_status([storage.photo(p) for p in result["successful_photo_ids"]], storage)
-        result["analysis_summary"] = summary["counts"]
-        result["analysis_scope"] = "successful_photos_in_this_scan"
-        result["analysis_suggested"] = bool(summary["counts"]["never_analyzed"] + summary["counts"]["needs_update"])
+        profile_id = storage.default_index_profile()
+        if profile_id is None:
+            result["index_summary"] = {
+                "profile_id": None, "status": "not_configured",
+                "counts": {"total": len(result["successful_photo_ids"])},
+                "reason": "Select an installed image index profile before indexing.",
+                "model_calls": 0,
+            }
+            result["index_suggested"] = bool(result["successful_photo_ids"])
+        else:
+            from .indexing import index_status
+            indexed = index_status([storage.photo(p) for p in result["successful_photo_ids"]],
+                                   storage, storage.index_profile(profile_id))
+            result["index_summary"] = {k: v for k, v in indexed.items() if k != "items"}
+            result["index_suggested"] = indexed["counts"]["ready"] < indexed["counts"]["total"]
+        result["index_scope"] = "successful_photos_in_this_scan"
         result["model_calls"] = 0
         storage.finish_scan(scan_id, result)
     if fatal:

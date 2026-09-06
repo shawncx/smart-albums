@@ -1,59 +1,49 @@
-# Albums and saved results
+# Albums: browsing, ingestion association and compatibility
 
-One state directory contains one SQLite database with scanning libraries, photos, albums, memberships, thumbnails and analyses. Album names are trimmed, Unicode-normalized and case-insensitively unique within that database. IDs remain stable when an album is renamed. Multiple albums reference the same photo record. This does not merge separately indexed copies or renamed original files.
+Albums are a data organization concept, not a fourth Skill capability. Public album viewing belongs to [management](management.md); import-time association belongs to [ingestion](ingest.md).
 
-## Commands
+One state directory contains one SQLite database with libraries, photos, albums, memberships and previews. A library is a scanning root; it is not an automatically synchronized album. Several albums can reference one photo without copying its preview or index results. Separately ingested copies/renamed original paths are not automatically merged.
 
-Use the same Python/script/state-directory prefix as ingestion. All names and IDs below are placeholders.
+Album names are trimmed, Unicode-normalized and case-insensitively unique in the database. Album IDs survive renaming through a compatibility interface.
 
-```text
-ingest <absolute-folder> --album-name <name>
-albums
-album-create <name>
-album-rename <album-id> <new-name>
-album-add <album-id> <photo-id> <photo-id>
-album-remove <album-id> <photo-id>
-photos --album-id <album-id> --limit 100
-thumbnail <photo-id> --output <absolute-preview.jpg>
-analysis-status --album-id <album-id>
-analysis-status --album-id <album-id> --status never_analyzed --limit 100
-analysis-status --album-id <album-id> --provider codex --model <model> --reasoning low
-analysis-report --album-id <album-id> --output <absolute-report.html>
-```
+## Public read-only viewing
 
-`album-create` reuses an existing matching name and reports `created: false`. Membership changes are atomic for the requested unique photo IDs. An unknown photo or album fails the operation. Repeating an add/remove is harmless. Removal only removes the relationship. Photo lists and status lists paginate via `next_cursor`/`--after` (limit 1–1000); retain other filters between pages.
-
-Ingestion with an album adds successful new, updated, restored and unchanged photos. Failed files are excluded from new membership; existing membership is retained for failed/missing photos. Without an album argument it creates no album and changes no memberships. Later source-directory additions require ingestion with the target album to join that album. A migration alone does not turn old libraries into albums.
-
-## Analysis status without model calls
-
-`analysis-status` also accepts `--library-id` instead of `--album-id`. It needs no credentials and never initializes a provider. The summary counts cover the entire selected album/library even when the returned list is filtered/paginated.
-
-| Status | Meaning |
-| --- | --- |
-| `never_analyzed` | No successful analysis is saved for this photo |
-| `saved` | A saved result matches the indexed photo/preview; no next-call model configuration was selected |
-| `cached` | A saved result also matches the explicitly selected analysis configuration |
-| `needs_update` | History exists, but no result matches the indexed image or requested configuration |
-
-These states are mutually exclusive. Source availability, missing preview metadata and the last failed attempt are separate fields/counts, which can overlap these states. Status reads hashes/versions from database metadata, not image BLOBs. `preview_integrity: not_checked` and the scope note make this limit explicit. Full image validation and original checks occur before analysis, and reports validate the BLOBs they display.
-
-After ingest, `analysis_summary` covers `successful_photo_ids` from that scan; it is not an album-wide summary. `analysis_suggested` flags never-analyzed/outdated saved versions. Offer the pending list and an optional next analysis step; do not run it without authorization. If a specific analysis configuration is relevant, query its status before promising cache reuse. A failed previous attempt does not erase a valid saved analysis.
-
-## Explicit analysis
+Prefix examples with the same interpreter/script/`--state-dir` used for ingestion:
 
 ```text
-analyze --album-id <album-id> --provider <provider> --limit 3
-analyze --album-id <album-id> --provider <provider> --pending-only --limit 3
-analyze --album-id <album-id> --provider <provider> --pending-only --all
+management albums --limit 100
+management album <album-id> --limit 100
+management photos --album-id <album-id> --limit 100
+management photo <photo-id> --html <output-directory>\photo.html
+management search "旅行" --mode metadata --target albums
 ```
 
-Use only the scope authorized by the user. Album/library selection defaults to five photos. `--pending-only` filters matching saved results before applying the sample limit; it cannot be combined with `--force`. Unavailable candidates are kept so preflight returns a visible error. Empty album/filter selections return zero work without checking credentials or calling a model. Explicit empty photo ID lists remain invalid.
+Use returned IDs. Follow `next_cursor` with `--after`, retaining filters. Browse limits are 1–1000, default 100. Album/photo views optionally export read-only JSON/HTML snapshots and work without originals, a model or a configured default profile.
 
-## Preview storage, browsing and migration
+Metadata album-name lookup uses Unicode NFC/casefold literal substrings, not SQL wildcards. New management views have no create/rename/delete/member controls or selection widgets.
 
-Schema v3 stores one current JPEG BLOB per photo, plus its source version, generation profile, image hash, dimensions and byte length. Photo lists do not load BLOBs. `thumbnail` exports a derived JPEG outside state/source directories; temporary exports are not the authoritative thumbnail store. Original file bytes are never inserted into the database.
+## Import-time association
 
-Reports with no provider/model filter show saved results across models, labeling history that no longer matches indexed input. With a filter they distinguish matching results from history. Offline originals do not prevent reading thumbnails, saved analyses or editing memberships. This does not establish that an offline original is unchanged, and new analysis still requires the source checks.
+```text
+ingestion <absolute-photo-root> --album-name <name>
+```
 
-Opening a v1/v2 database makes a SQLite backup in `backups/`, then migrates legacy preview bytes transactionally. Photo IDs, analysis rows and image bytes are preserved; old preview files remain. Missing/invalid/externally located legacy previews produce `THUMBNAIL_MIGRATION_FAILED` with per-photo repair details and roll back schema/data changes. Restore those previews using the prior version or backup, then retry. Backups contain indexed data and, for v3, previews; they do not include originals. Use a consistent SQLite backup operation, not an arbitrary copy during writes.
+This retained ingestion option creates/reuses the album and associates successful new, updated, restored and unchanged photos. Failed photos get no new membership; existing failed/missing members remain. Omitting `--album-name` changes no memberships. Later source additions require another ingestion with the target album to join it.
+
+Album relationships are not part of image-index identity. Adding a relationship during ingestion does not load a model, duplicate a vector or regenerate another valid profile's index. A migration does not automatically convert source libraries into albums.
+
+## Compatibility-only album writes
+
+Existing top-level `albums`, `album-create`, `album-rename`, `album-add`, `album-remove`, `photos --album-id` and legacy `search-add` interfaces remain available for old clients and explicitly requested compatibility use. They are **not public management operations**, not automatic follow-ups to a new search, and not another Skill capability.
+
+The old create operation reuses a matching name. Explicit member add/remove operations validate IDs and are atomic/idempotent; removing membership deletes only the relationship, not photo records, previews, observations, vectors or original files. Do not route new management snapshots into legacy selection; see [search compatibility](search.md).
+
+Observation commands and their old tables have been retired. Schema v7 migration preserves retired data in its backup before removing the tables. Album browsing, saved snapshot selection and image-index search do not depend on them.
+
+## Previews and schema migration
+
+SQLite holds the current JPEG BLOB plus source version, profile, hash and dimensions. Exported JPEGs are derived copies, not the authoritative preview store. Original file bytes are not inserted into SQLite.
+
+Schema v7 retains current photo/album/preview and image-index data, but drops the nine unused analysis/workflow/text-vector tables after a consistent backup. New databases contain only active tables. Opening an older supported database can perform this migration even for read-only browsing. Older thumbnail migration still requires valid saved preview files; repair reported errors rather than dropping data. Old preview files are not automatically deleted.
+
+State backups do not contain originals. Use consistent SQLite backup operations and preserve separately stored source photos. The migration contract is not a report of a verified live-library upgrade; see [index design](../../docs/index-design.md).

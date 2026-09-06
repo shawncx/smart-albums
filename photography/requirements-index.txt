@@ -1,0 +1,12 @@
+# Install in a dedicated CPython 3.14 64-bit virtual environment, not shared Python.
+# Windows CPU wheels verified against PyPI and the official PyTorch CPU index.
+# tokenizer.json is loaded directly; neither SentencePiece nor torchvision is needed.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.10.0+cpu
+transformers==4.57.6
+tokenizers==0.22.2
+huggingface-hub==0.36.2
+hf-xet==1.2.0
+safetensors==0.7.0
+numpy==2.4.2
+Pillow==12.3.0

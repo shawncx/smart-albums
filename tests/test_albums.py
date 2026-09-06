@@ -11,13 +11,13 @@ from contextlib import closing, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from test_analyze import FakeProvider, SAMPLE
-from photography_lib import Config, ingest, analyze
-from photography_lib.cli import main, parser, selected_ids
+from legacy_fixtures import seed_observation
+from photography_lib import Config, ingest
+from photography_lib.cli import main
 from photography_lib.config import PhotographyError
-from photography_lib.report import analysis_report
+from photography_lib.management import photos as management_photos
+from photography_lib.management_report import management_report
 from photography_lib.sqlite_storage import SQLiteStorage
-from photography_lib.status import analysis_status
 from photography_lib.thumbnails import stored_preview
 from PIL import Image
 
@@ -55,16 +55,17 @@ class AlbumTests(unittest.TestCase):
                 photo["thumbnail_path"] = relative
                 store.put_photo(photo)
             for table in ("photo_embeddings", "embedding_encoders", "album_photos", "albums", "thumbnails"):
-                store.db.execute(f"DROP TABLE {table}")
+                store.db.execute(f"DROP TABLE IF EXISTS {table}")
             if version == 1:
-                store.db.execute("DROP TABLE analyses")
-                store.db.execute("DROP TABLE analysis_runs")
+                store.db.execute("DROP TABLE IF EXISTS analyses")
+                store.db.execute("DROP TABLE IF EXISTS analysis_runs")
             store.db.execute(f"PRAGMA user_version={version}")
         return originals
 
-    def test_many_albums_share_one_photo_preview_and_analysis(self):
-        provider = FakeProvider()
-        first = analyze([self.ids[0]], config=self.config, provider=provider)
+    def test_many_albums_share_one_photo_and_preview(self):
+        with SQLiteStorage(self.config.state_dir) as store:
+            before = store.photo(self.ids[0])
+            thumbnail = store.thumbnail(self.ids[0])
         second = ingest(self.photos, config=self.config, album_name="黑白")
         again = ingest(self.photos, config=self.config, album_name="黑白")
         self.assertEqual((second["unchanged"], second["album_added"], again["album_added"]), (3, 3, 0))
@@ -75,9 +76,8 @@ class AlbumTests(unittest.TestCase):
             store.change_members(self.album_id, [self.ids[0]], remove=True)
             self.assertEqual(len(store.photos_for_album(self.album_id)), 2)
             self.assertEqual(len(store.photos_for_album(second["album"]["album_id"])), 3)
-        cached = analyze([self.ids[0]], config=self.config, provider=provider)
-        self.assertEqual((cached["cached"], provider.calls), (1, 1))
-        self.assertEqual(first["results"][0]["analysis_id"], cached["results"][0]["analysis_id"])
+            self.assertEqual(store.photo(self.ids[0]), before)
+            self.assertEqual(store.thumbnail(self.ids[0]), thumbnail)
 
     def test_album_names_pagination_and_atomic_members(self):
         with SQLiteStorage(self.config.state_dir) as store:
@@ -143,103 +143,64 @@ class AlbumTests(unittest.TestCase):
                 return sqlite3.SQLITE_DENY if action == sqlite3.SQLITE_READ and table == "thumbnails" and column == "data" else sqlite3.SQLITE_OK
             store.db.set_authorizer(deny_blob)
             self.assertEqual(len(store.album_photos(self.album_id)["items"]), 3)
-            # Status only needs hash/version metadata, not image lengths or bytes.
-            self.assertEqual(analysis_status(store.photos_for_album(self.album_id), store)["counts"]["never_analyzed"], 3)
+            self.assertEqual(management_photos(store=store, album_id=self.album_id)["total"], 3)
 
-    def test_status_filters_history_profile_and_unavailability(self):
-        provider = FakeProvider()
-        analyze([self.ids[0]], config=self.config, provider=provider)
-        with SQLiteStorage(self.config.state_dir) as store:
-            photos = store.photos_for_album(self.album_id)
-            self.assertEqual(analysis_status(photos, store)["counts"]["saved"], 1)
-            self.assertEqual(analysis_status(photos, store, provider)["counts"]["cached"], 1)
-            different = analysis_status(photos, store, FakeProvider(version="other"))
-            self.assertEqual(different["counts"]["needs_update"], 1)
-        Image.new("RGB", (120, 100), "yellow").save(self.photos / "0.jpg")
-        ingest(self.photos, config=self.config)
-        with SQLiteStorage(self.config.state_dir) as store:
-            changed = analysis_status(store.photos_for_album(self.album_id), store, provider)
-            self.assertEqual((changed["counts"]["needs_update"], changed["counts"]["never_analyzed"]), (1, 2))
-
-    def test_ingest_status_album_and_report_never_initialize_provider(self):
-        with patch("photography_lib.vision.OpenAIResponsesProvider.check_ready", side_effect=AssertionError("Provider checked")), \
-             patch("photography_lib.vision.OpenAIResponsesProvider.analyze", side_effect=AssertionError("Model called")), \
-             patch("photography_lib.codex_vision.CodexCLIProvider.check_ready", side_effect=AssertionError("Login checked")), \
-             patch("photography_lib.codex_vision.CodexCLIProvider.analyze", side_effect=AssertionError("Model called")):
+    def test_ingest_browse_album_and_report_never_initialize_model(self):
+        with patch("photography_lib.siglip_embedding.SiglipEncoder", side_effect=AssertionError("Model initialized")), \
+             patch("urllib.request.urlopen", side_effect=AssertionError("Network called")):
             self.assertEqual(self.cli("ingest", str(self.photos), "--album-name", "CLI")[0], 0)
-            code, result = self.cli("analysis-status", "--album-id", self.album_id, "--provider", "codex", "--limit", "1")
-            self.assertEqual((code, result["counts"]["never_analyzed"], len(result["items"])), (0, 3, 1))
+            code, result = self.cli("management", "photos", "--album-id", self.album_id, "--limit", "1")
+            self.assertEqual((code, result["total"], len(result["items"])), (0, 3, 1))
             self.assertIsNotNone(result["next_cursor"])
-            self.assertEqual(self.cli("analysis-report", "--album-id", self.album_id, "--output", str(self.base / "report.html"))[0], 0)
+            self.assertEqual(self.cli("management", "photos", "--album-id", self.album_id,
+                                     "--html", str(self.base / "report.html"))[0], 0)
             self.assertEqual(self.cli("albums")[0], 0)
 
     def test_offline_browsing_and_export_preserve_saved_results(self):
-        provider = FakeProvider()
-        analyze([self.ids[0]], config=self.config, provider=provider)
+        with SQLiteStorage(self.config.state_dir) as store:
+            before = store.photo(self.ids[0])
         offline = self.base / "offline"
         self.photos.rename(offline)
         with SQLiteStorage(self.config.state_dir) as store:
-            result = analysis_report(None, self.base / "offline.html", config=self.config, store=store, album_id=self.album_id)
-            self.assertEqual((result["photos"], result["analyzed"], result["source_unavailable"]), (3, 1, 3))
+            result = management_photos(store=store, album_id=self.album_id)
+            management_report(result, self.base / "offline.html", config=self.config, store=store)
+            self.assertEqual(result["total"], 3)
             page = (self.base / "offline.html").read_text(encoding="utf-8")
             self.assertEqual(page.count("data:image/jpeg;base64,"), 3)
-            self.assertIn(SAMPLE["visual_description"], page)
             store.rename_album(self.album_id, "离线相册")
+            self.assertEqual(store.photo(self.ids[0]), before)
         code, output = self.cli("thumbnail", self.ids[0], "--output", str(self.base / "export.jpg"))
         self.assertEqual(code, 0)
         self.assertGreater(Path(output["output"]).stat().st_size, 0)
-        self.assertEqual(provider.calls, 1)
 
-    def test_cli_pending_filter_honors_limit_and_empty_selection(self):
-        provider = FakeProvider()
-        analyze([self.ids[0]], config=self.config, provider=provider)
-        args = parser().parse_args(["analyze", "--album-id", self.album_id, "--pending-only", "--limit", "1"])
+    def test_v2_migration_preserves_bytes_archived_records_and_backup(self):
         with SQLiteStorage(self.config.state_dir) as store:
-            ids = selected_ids(args, store, provider)
-        self.assertEqual(len(ids), 1)
-        self.assertNotIn(self.ids[0], ids)
-        empty = self.cli("album-create", "empty")[1]["album_id"]
-        with patch("photography_lib.vision.OpenAIResponsesProvider.check_ready", side_effect=AssertionError("Provider checked")):
-            code, result = self.cli("analyze", "--album-id", empty)
-        self.assertEqual((code, result["requested"], result["model_calls"]), (0, 0, 0))
-
-    def test_pending_filter_does_not_hide_corrupt_cached_preview(self):
-        provider = FakeProvider()
-        analyze(self.ids, config=self.config, provider=provider)
-        args = parser().parse_args(["analyze", "--album-id", self.album_id, "--pending-only", "--all"])
-        with SQLiteStorage(self.config.state_dir) as store:
-            store.db.execute("UPDATE thumbnails SET data=? WHERE photo_id=?", (b"corrupt", self.ids[0]))
-            ids = selected_ids(args, store, provider)
-        self.assertEqual(ids, [self.ids[0]])
-        plan = analyze(ids, config=self.config, provider=provider, dry_run=True)
-        self.assertEqual((plan["failed"], provider.calls), (1, 3))
-
-    def test_v2_migration_preserves_bytes_records_cache_and_backup(self):
-        provider = FakeProvider()
-        run = analyze([self.ids[0]], config=self.config, provider=provider)
+            archived = seed_observation(store, self.ids[0])
+            run = {"run_id": "archived-run", "status": "completed", "results": []}
+            store.db.execute("INSERT INTO analysis_runs VALUES (?,?,?)",
+                             (run["run_id"], run["status"], json.dumps(run)))
         originals = self.legacy()
         with SQLiteStorage(self.config.state_dir) as store:
-            self.assertEqual(store.db.execute("PRAGMA user_version").fetchone()[0], 5)
+            self.assertEqual(store.db.execute("PRAGMA user_version").fetchone()[0], 7)
             self.assertEqual(store.albums(), [])
             for old in originals:
                 expected = {k: v for k, v in old.items() if k != "thumbnail_path"}
                 expected["thumbnail_id"] = old["photo_id"]
                 self.assertEqual(store.photo(old["photo_id"]), expected)
                 self.assertEqual(store.thumbnail(old["photo_id"])["data"], (self.config.state_dir / old["thumbnail_path"]).read_bytes())
-            self.assertEqual(store.analysis_run(run["run_id"]), run)
-            self.assertEqual(analysis_status(store.photos_for_library(self.scan["library_id"]), store, provider)["counts"]["cached"], 1)
+            self.assertIsNone(store.db.execute("SELECT name FROM sqlite_master WHERE name='analyses'").fetchone())
         backups = list((self.config.state_dir / "backups").glob("schema-v2-*.db"))
         self.assertEqual(len(backups), 1)
         with closing(sqlite3.connect(backups[0])) as db:
             self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 2)
-        cached = analyze([self.ids[0]], config=self.config, provider=provider)
-        self.assertEqual((cached["cached"], provider.calls), (1, 1))
+            self.assertEqual(json.loads(db.execute("SELECT data_json FROM analysis_runs").fetchone()[0]), run)
+            self.assertEqual(json.loads(db.execute("SELECT data_json FROM analyses").fetchone()[0]), archived)
 
     def test_v1_legacy_files_upgrade_without_analysis(self):
         self.legacy(version=1)
         with SQLiteStorage(self.config.state_dir) as store:
             self.assertEqual(store.db.execute("SELECT count(*) FROM thumbnails").fetchone()[0], 3)
-            self.assertEqual(store.db.execute("SELECT count(*) FROM analyses").fetchone()[0], 0)
+            self.assertIsNone(store.db.execute("SELECT name FROM sqlite_master WHERE name='analyses'").fetchone())
 
     def test_missing_legacy_preview_rolls_back_then_retries(self):
         originals = self.legacy()

@@ -11,12 +11,18 @@ from uuid import uuid4
 
 from .config import PhotographyError
 from .thumbnails import MAX_PREVIEW_BYTES, validate_preview
-from .workflow_storage import WORKFLOW_SCHEMA, WorkflowStorage
+from .index_storage import INDEX_SCHEMA, IndexStorage
 
 
 def now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
+
+SCHEMA_VERSION = 7
+RETIRED_TABLES = (
+    "analysis_claims", "analysis_plan_items", "analysis_requests", "analysis_plans",
+    "analysis_settings", "photo_embeddings", "embedding_encoders", "analysis_runs", "analyses",
+)
 
 SCHEMA = (
     """CREATE TABLE IF NOT EXISTS libraries (
@@ -39,13 +45,6 @@ SCHEMA = (
         scan_id TEXT NOT NULL REFERENCES scans(scan_id),
         kind TEXT NOT NULL, photo_id TEXT, path TEXT NOT NULL, error_json TEXT)""",
     "CREATE INDEX IF NOT EXISTS events_scan ON scan_events(scan_id, event_id)",
-    """CREATE TABLE IF NOT EXISTS analyses (
-        analysis_id TEXT PRIMARY KEY,
-        photo_id TEXT NOT NULL REFERENCES photos(photo_id),
-        cache_key TEXT NOT NULL, created_at TEXT NOT NULL, data_json TEXT NOT NULL)""",
-    "CREATE INDEX IF NOT EXISTS analyses_cache ON analyses(photo_id,cache_key,created_at)",
-    """CREATE TABLE IF NOT EXISTS analysis_runs (
-        run_id TEXT PRIMARY KEY, status TEXT NOT NULL, data_json TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS albums (
         album_id TEXT PRIMARY KEY, name TEXT NOT NULL, name_key TEXT NOT NULL UNIQUE,
         created_at TEXT NOT NULL, updated_at TEXT NOT NULL)""",
@@ -59,24 +58,10 @@ SCHEMA = (
         content_version TEXT NOT NULL, profile TEXT NOT NULL, image_hash TEXT NOT NULL,
         mime_type TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
         created_at TEXT NOT NULL, size_bytes INTEGER NOT NULL, data BLOB NOT NULL)""",
-    # Preserve the v4/v5 archive schema; retired text-index rows are never rewritten.
-    """CREATE TABLE IF NOT EXISTS embedding_encoders (
-        encoder_id TEXT PRIMARY KEY, profile_json TEXT NOT NULL, created_at TEXT NOT NULL)""",
-    """CREATE TABLE IF NOT EXISTS photo_embeddings (
-        photo_id TEXT NOT NULL REFERENCES photos(photo_id),
-        encoder_id TEXT NOT NULL REFERENCES embedding_encoders(encoder_id),
-        analysis_id TEXT NOT NULL REFERENCES analyses(analysis_id),
-        content_version TEXT NOT NULL, text_hash TEXT NOT NULL, recipe_version TEXT NOT NULL,
-        dimensions INTEGER NOT NULL CHECK(dimensions BETWEEN 1 AND 4096),
-        dtype TEXT NOT NULL CHECK(dtype='float32-le'), normalized INTEGER NOT NULL CHECK(normalized=1),
-        vector BLOB NOT NULL, vector_hash TEXT NOT NULL, token_count INTEGER NOT NULL,
-        truncated INTEGER NOT NULL, created_at TEXT NOT NULL,
-        PRIMARY KEY(photo_id,encoder_id))""",
-    "CREATE INDEX IF NOT EXISTS embeddings_encoder ON photo_embeddings(encoder_id,photo_id)",
 )
 
 
-class SQLiteStorage(WorkflowStorage):
+class SQLiteStorage(IndexStorage):
     def __init__(self, state_dir: Path):
         self.db = None
         try:
@@ -84,24 +69,38 @@ class SQLiteStorage(WorkflowStorage):
             self.db = sqlite3.connect(state_dir / "photography.db", timeout=5, isolation_level=None)
             self.db.row_factory = sqlite3.Row
             self.db.execute("PRAGMA foreign_keys=ON")
-            version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            if version in (1, 2, 3, 4):
-                # Keep a consistent pre-migration snapshot, including analysis history.
-                backup_dir = state_dir / "backups"
-                backup_dir.mkdir(exist_ok=True)
-                with closing(sqlite3.connect(backup_dir / f"schema-v{version}-{uuid4().hex}.db")) as backup:
-                    self.db.backup(backup)
             with self.transaction():
                 version = self.db.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1, 2, 3, 4, 5):
+                if version not in (0, 1, 2, 3, 4, 5, 6, SCHEMA_VERSION):
                     raise PhotographyError("SCHEMA_UNSUPPORTED", f"Unsupported database schema: {version}.")
+                if 0 < version < SCHEMA_VERSION:
+                    # The reserved writer lock also protects the backup-to-migration boundary.
+                    # A separate source connection can read while this connection owns that lock.
+                    backup_dir = state_dir / "backups"
+                    backup_dir.mkdir(exist_ok=True)
+                    with closing(sqlite3.connect(state_dir / "photography.db")) as source, \
+                         closing(sqlite3.connect(backup_dir / f"schema-v{version}-{uuid4().hex}.db")) as backup:
+                        source.backup(backup)
+                    self._validate_database()
+                    preserved_tables = self._migration_snapshot(migrate_photos=version in (1, 2))
                 for statement in SCHEMA:
                     self.db.execute(statement)
-                for statement in WORKFLOW_SCHEMA:
+                for statement in INDEX_SCHEMA:
                     self.db.execute(statement)
                 if version in (1, 2):
                     self._migrate_thumbnails(state_dir)
-                self.db.execute("PRAGMA user_version=5")
+                if 0 < version < SCHEMA_VERSION:
+                    self._drop_retired_tables()
+                    current = self._migration_snapshot()
+                    for table, rows in preserved_tables.items():
+                        preserved = (set(rows).issubset(current.get(table, ())) if
+                                     table == "thumbnails" and version in (1, 2) else rows == current.get(table))
+                        if not preserved:
+                            raise PhotographyError("SCHEMA_MIGRATION_FAILED",
+                                f"Migration changed retained records in {table}; all changes were rolled back.")
+                if version != SCHEMA_VERSION:
+                    self._validate_database()
+                    self.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
         except (OSError, sqlite3.Error) as exc:
             self.close()
             raise PhotographyError("STORAGE_UNAVAILABLE", str(exc)) from exc
@@ -113,6 +112,53 @@ class SQLiteStorage(WorkflowStorage):
         if self.db is not None:
             self.db.close()
             self.db = None
+
+    def _validate_database(self):
+        integrity = [row[0] for row in self.db.execute("PRAGMA integrity_check")]
+        foreign_keys = list(self.db.execute("PRAGMA foreign_key_check"))
+        if integrity != ["ok"] or foreign_keys:
+            raise PhotographyError("SCHEMA_MIGRATION_FAILED",
+                "Database integrity or foreign-key validation failed; migration was rolled back.")
+
+    def _migration_snapshot(self, *, migrate_photos=False):
+        tables = [row[0] for row in self.db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+        snapshot = {}
+        for table in tables:
+            if table.casefold() in RETIRED_TABLES:
+                continue
+            hashes = []
+            escaped = table.replace('"', '""')
+            for record in self.db.execute(f'SELECT * FROM "{escaped}"'):
+                row = dict(record)
+                if table == "photos" and migrate_photos:
+                    photo = json.loads(row["data_json"])
+                    photo.pop("thumbnail_path", None)
+                    photo["thumbnail_id"] = photo["photo_id"]
+                    row["data_json"] = json.dumps(photo, ensure_ascii=False)
+                digest = hashlib.sha256()
+                for name, value in row.items():
+                    digest.update(name.encode("utf-8") + b"\0")
+                    raw = value if isinstance(value, bytes) else json.dumps(value, ensure_ascii=False).encode("utf-8")
+                    digest.update((b"B" if isinstance(value, bytes) else b"J") + len(raw).to_bytes(8, "big") + raw)
+                hashes.append(digest.hexdigest())
+            snapshot[table] = sorted(hashes)
+        return snapshot
+
+    def _drop_retired_tables(self):
+        tables = [row[0] for row in self.db.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")]
+        for table in tables:
+            if table.casefold() in RETIRED_TABLES:
+                continue
+            escaped = table.replace('"', '""')
+            if any(row["table"].casefold() in RETIRED_TABLES
+                   for row in self.db.execute(f'PRAGMA foreign_key_list("{escaped}")')):
+                raise PhotographyError("SCHEMA_MIGRATION_FAILED",
+                    f"Retained table {table} references a retired table; resolve that dependency before migration.")
+        # Drop dependents before their parents with foreign-key enforcement enabled.
+        for table in RETIRED_TABLES:
+            self.db.execute(f'DROP TABLE IF EXISTS "{table}"')
 
     def _migrate_thumbnails(self, state_dir):
         failures = []
@@ -242,20 +288,6 @@ class SQLiteStorage(WorkflowStorage):
         return [json.loads(row[0]) for row in self.db.execute("""SELECT p.data_json FROM photos p
             JOIN album_photos ap ON ap.photo_id=p.photo_id WHERE ap.album_id=? ORDER BY p.photo_id""", (album_id,))]
 
-    def analysis_records(self, photo_id):
-        return [json.loads(row[0]) for row in self.db.execute(
-            "SELECT data_json FROM analyses WHERE photo_id=? ORDER BY created_at DESC,rowid DESC", (photo_id,))]
-
-    def latest_analysis_failure(self, photo_id):
-        # Runs retain their existing JSON format; this query reads only matching failures.
-        row = self.db.execute("""SELECT r.data_json,e.value FROM analysis_runs r, json_each(r.data_json,'$.results') e
-            WHERE json_extract(e.value,'$.photo_id')=? ORDER BY r.rowid DESC LIMIT 1""", (photo_id,)).fetchone()
-        if row:
-            entry = json.loads(row[1])
-            if entry["status"] == "failed":
-                return {"run_id": json.loads(row[0])["run_id"], "error": entry.get("error")}
-        return None
-
     def __enter__(self):
         return self
 
@@ -363,45 +395,3 @@ class SQLiteStorage(WorkflowStorage):
             item["error"] = json.loads(item.pop("error_json")) if row["error_json"] else None
             items.append(item)
         return {"items": items, "next_cursor": items[-1]["event_id"] if len(rows) > limit else None}
-
-    def cached_analysis(self, photo_id: str, cache_key: str) -> dict | None:
-        row = self.db.execute("""SELECT data_json FROM analyses
-            WHERE photo_id=? AND cache_key=? ORDER BY created_at DESC, rowid DESC LIMIT 1""",
-            (photo_id, cache_key)).fetchone()
-        return json.loads(row[0]) if row else None
-
-    def put_analysis(self, record: dict):
-        self.db.execute("INSERT INTO analyses VALUES (?,?,?,?,?)",
-                        (record["analysis_id"], record["photo_id"], record["cache_key"],
-                         record["created_at"], json.dumps(record, ensure_ascii=False)))
-
-    def analysis(self, analysis_id: str) -> dict:
-        row = self.db.execute("SELECT data_json FROM analyses WHERE analysis_id=?", (analysis_id,)).fetchone()
-        if row is None:
-            raise PhotographyError("ANALYSIS_NOT_FOUND", "Analysis does not exist.")
-        return json.loads(row[0])
-
-    def analyses(self, photo_id: str, limit: int = 100, after: int = 0) -> dict:
-        self._limit(limit)
-        photo = self.photo(photo_id)
-        rows = self.db.execute("""SELECT rowid,data_json FROM analyses
-            WHERE photo_id=? AND rowid>? ORDER BY rowid LIMIT ?""", (photo_id, after, limit + 1)).fetchall()
-        items = []
-        for row in rows[:limit]:
-            item = json.loads(row[1])
-            item["matches_indexed_photo"] = (photo["state"] == "available"
-                and item["content_version"] == photo["content_version"]
-                and item["thumbnail_profile"] == photo["thumbnail_profile"])
-            items.append(item)
-        return {"items": items, "next_cursor": rows[limit - 1][0] if len(rows) > limit else None}
-
-    def save_analysis_run(self, result: dict):
-        self.db.execute("""INSERT INTO analysis_runs VALUES (?,?,?)
-            ON CONFLICT(run_id) DO UPDATE SET status=excluded.status,data_json=excluded.data_json""",
-            (result["run_id"], result["status"], json.dumps(result, ensure_ascii=False)))
-
-    def analysis_run(self, run_id: str) -> dict:
-        row = self.db.execute("SELECT data_json FROM analysis_runs WHERE run_id=?", (run_id,)).fetchone()
-        if row is None:
-            raise PhotographyError("ANALYSIS_RUN_NOT_FOUND", "Analysis run does not exist.")
-        return json.loads(row[0])

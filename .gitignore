@@ -1,6 +1,7 @@
 __pycache__/
 *.py[cod]
 .venv/
+.venv-index/
 .photography-state/
 .agents/
 .dev-deps/
@@ -20,6 +21,4 @@ artifacts/
 /docs/*
 !/docs/TODO.md
 !/docs/ingestion-index-management-plan.md
-!/docs/local-vision-analysis-plan.md
-!/docs/local-vision-analysis-examples.json
-!/docs/local-vision-schema-v6.sql
+!/docs/index-design.md

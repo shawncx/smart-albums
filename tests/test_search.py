@@ -12,14 +12,14 @@ from contextlib import closing, redirect_stderr, redirect_stdout
 from pathlib import Path
 from unittest.mock import patch
 
-from test_analyze import FakeProvider
+from legacy_fixtures import seed_observation
 from PIL import Image
-from photography_lib import Config, ingest, analyze
+from photography_lib import Config, ingest
 from photography_lib.cli import main, parser
 from photography_lib.config import PhotographyError
 from photography_lib.search import add_search_selection
 from photography_lib.search_report import search_report
-from photography_lib.sqlite_storage import SQLiteStorage, SCHEMA, now
+from photography_lib.sqlite_storage import SQLiteStorage, SCHEMA
 
 
 class SavedSearchTests(unittest.TestCase):
@@ -38,32 +38,25 @@ class SavedSearchTests(unittest.TestCase):
         self.addCleanup(self.store.close)
         photos = sorted(self.store.photos_for_library(self.library_id), key=lambda p: p["relative_path"])
         self.ids = [p["photo_id"] for p in photos]
-        analyze(self.ids[:2], config=self.config, provider=FakeProvider(), storage=self.store)
-        stamp = now()
-        self.store.db.execute("INSERT INTO embedding_encoders VALUES (?,?,?)",
-            ("archived-fixture", '{"model":"synthetic-archive-fixture","dimensions":384}', stamp))
+        profile = {"model": "synthetic-image-fixture", "dimensions": 384, "dtype": "float32-le", "normalized": True}
+        profile_id = self.store.put_index_profile(profile)
         vector = struct.pack("<384f", 1., *([0.] * 383))
         results = []
         for photo in photos[:2]:
-            observation = self.store.analysis_records(photo["photo_id"])[0]
-            self.store.db.execute("INSERT INTO photo_embeddings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                (photo["photo_id"], "archived-fixture", observation["analysis_id"], photo["content_version"],
-                 "synthetic-text-hash", "archived-fixture", 384, "float32-le", 1, vector,
-                 hashlib.sha256(vector).hexdigest(), 10, 0, stamp))
+            snapshot = {**photo, "input_image_hash": self.store.thumbnail(photo["photo_id"], include_data=False)["image_hash"]}
+            self.store._put_index_result(snapshot, profile_id, vector, hashlib.sha256(vector).hexdigest(), 384)
             results.append({"photo_id": photo["photo_id"], "relative_path": photo["relative_path"],
                 "score": .5, "description": "Synthetic saved search result.",
-                "analysis_id": observation["analysis_id"], "content_version": photo["content_version"],
+                "analysis_id": "historical-snapshot-only", "content_version": photo["content_version"],
                 "thumbnail_id": photo["photo_id"]})
         self.snapshot = {"search_id": "saved-fixture", "query": "Synthetic query",
             "encoder_id": "archived-fixture", "results": results,
             "coverage": {"ready": 2, "missing": 0, "stale": 0, "needs_analysis": 1, "invalid": 0, "total": 3}}
         self.snapshot_path = self.base / "search.json"
         self.snapshot_path.write_text(json.dumps(self.snapshot), encoding="utf-8")
-        for target in ("photography_lib.vision.OpenAIResponsesProvider.analyze",
-                       "photography_lib.codex_vision.CodexCLIProvider.analyze", "urllib.request.urlopen"):
-            guard = patch(target, side_effect=AssertionError("No model or network calls allowed"))
-            guard.start()
-            self.addCleanup(guard.stop)
+        guard = patch("urllib.request.urlopen", side_effect=AssertionError("No network calls allowed"))
+        guard.start()
+        self.addCleanup(guard.stop)
 
     def cli(self, *args):
         output = io.StringIO()
@@ -74,8 +67,8 @@ class SavedSearchTests(unittest.TestCase):
     def rows(self, table):
         return [tuple(r) for r in self.store.db.execute(f"SELECT * FROM {table} ORDER BY rowid")]
 
-    def test_selection_uses_frozen_ids_and_preserves_archived_vectors(self):
-        before = self.rows("photo_embeddings")
+    def test_selection_uses_frozen_ids_and_preserves_image_vectors(self):
+        before = self.rows("image_index_results")
         photo = self.store.photo(self.ids[0])
         self.store.put_photo({**photo, "content_version": "changed-since-snapshot"})
         first = add_search_selection(self.snapshot, [self.ids[0]], store=self.store, album_name="Selected")
@@ -83,7 +76,7 @@ class SavedSearchTests(unittest.TestCase):
         self.assertEqual((first["added"], again["added"]), (1, 0))
         self.assertEqual(first["search_id"], self.snapshot["search_id"])
         self.assertEqual((first["visual_model_calls"], first["local_model_calls"]), (0, 0))
-        self.assertEqual(before, self.rows("photo_embeddings"))
+        self.assertEqual(before, self.rows("image_index_results"))
         self.assertEqual([p["photo_id"] for p in self.store.photos_for_album(first["album_id"])], [self.ids[0]])
 
     def test_nonresult_selection_rejected_atomically(self):
@@ -127,12 +120,13 @@ class SavedSearchTests(unittest.TestCase):
 
     def test_retired_commands_are_rejected_without_creating_state(self):
         state = self.base / "unused-state"
-        for command in ("embedding-setup", "embed", "embedding-status", "search", "index"):
+        for command in ("embedding-setup", "embed", "embedding-status", "search"):
             with self.subTest(command=command), redirect_stderr(io.StringIO()), self.assertRaises(SystemExit) as error:
                 main(["--state-dir", str(state), command])
             self.assertEqual(error.exception.code, 2)
         self.assertFalse(state.exists())
-        self.assertIn("not yet available", " ".join(parser().format_help().split()))
+        for command in ("ingestion", "index", "management"):
+            self.assertIn(command, parser().format_help())
 
     def test_browsing_and_selection_need_no_originals_or_embedding_runtime(self):
         for photo in self.source.iterdir():
@@ -145,7 +139,7 @@ class SavedSearchTests(unittest.TestCase):
             return original_import(name, *args, **kwargs)
 
         with patch("builtins.__import__", side_effect=guard):
-            self.assertEqual(self.cli("analysis-status", "--library-id", self.library_id)[0], 0)
+            self.assertEqual(self.cli("management", "photos", "--library-id", self.library_id)[0], 0)
             self.assertEqual(self.cli("search-add", str(self.snapshot_path), self.ids[0],
                                       "--album-name", "Offline")[0], 0)
             output = self.base / "offline.html"
@@ -170,40 +164,45 @@ class SavedSearchTests(unittest.TestCase):
         self.assertEqual(search_report(self.snapshot, output, config=self.config, store=self.store), str(output))
         self.assertTrue(output.is_file())
 
-    def test_v5_reopen_preserves_all_rows_and_archive_bytes(self):
-        tables = ("libraries", "photos", "thumbnails", "analyses", "analysis_runs", "albums",
-                  "album_photos", "embedding_encoders", "photo_embeddings")
+    def test_reopen_preserves_all_active_rows_and_vector_bytes(self):
+        tables = ("libraries", "photos", "thumbnails", "albums",
+                  "album_photos", "image_index_profiles", "image_index_results")
         before = {table: self.rows(table) for table in tables}
         self.store.close()
         self.store = SQLiteStorage(self.config.state_dir)
         self.addCleanup(self.store.close)
         self.assertEqual(before, {table: self.rows(table) for table in tables})
-        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], 7)
         self.assertEqual(self.store.db.execute("PRAGMA integrity_check").fetchone()[0], "ok")
         self.assertEqual(self.store.db.execute("PRAGMA foreign_key_check").fetchall(), [])
 
-    def test_v4_upgrade_preserves_archived_vectors_and_backup(self):
+    def test_v4_upgrade_removes_old_vectors_only_after_backup(self):
+        observation = seed_observation(self.store, self.ids[0])
+        self.store.db.execute("INSERT INTO embedding_encoders VALUES ('old','{}','old')")
+        self.store.db.execute("INSERT INTO photo_embeddings VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (self.ids[0], "old", observation["analysis_id"], "old-version", "old-hash", "old-recipe",
+             1, "float32-le", 1, b"old-vector", "checksum", 1, 0, "old"))
         before = self.rows("photo_embeddings")
+        current = self.rows("image_index_results")
         self.store.db.execute("PRAGMA user_version=4")
         self.store.close()
         self.store = SQLiteStorage(self.config.state_dir)
         self.addCleanup(self.store.close)
-        self.assertEqual(before, self.rows("photo_embeddings"))
-        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertEqual(current, self.rows("image_index_results"))
+        self.assertIsNone(self.store.db.execute("SELECT name FROM sqlite_master WHERE name='photo_embeddings'").fetchone())
+        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], 7)
         backup = next((self.config.state_dir / "backups").glob("schema-v4-*.db"))
         with closing(sqlite3.connect(backup)) as db:
             self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 4)
             self.assertEqual(before, db.execute("SELECT * FROM photo_embeddings ORDER BY rowid").fetchall())
 
     def test_v3_migration_preserves_data_and_consistent_backup(self):
-        self.store.db.execute("DROP TABLE photo_embeddings")
-        self.store.db.execute("DROP TABLE embedding_encoders")
         self.store.db.execute("PRAGMA user_version=3")
-        before = {table: self.rows(table) for table in ("thumbnails", "analyses")}
+        before = {table: self.rows(table) for table in ("thumbnails", "photos", "image_index_results")}
         self.store.close()
         self.store = SQLiteStorage(self.config.state_dir)
         self.addCleanup(self.store.close)
-        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], 5)
+        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], 7)
         self.assertEqual(before, {table: self.rows(table) for table in before})
         backup = next((self.config.state_dir / "backups").glob("schema-v3-*.db"))
         with closing(sqlite3.connect(backup)) as db:
@@ -211,15 +210,13 @@ class SavedSearchTests(unittest.TestCase):
             self.assertEqual(db.execute("PRAGMA integrity_check").fetchone()[0], "ok")
 
     def test_migration_failure_rolls_back(self):
-        self.store.db.execute("DROP TABLE photo_embeddings")
-        self.store.db.execute("DROP TABLE embedding_encoders")
         self.store.db.execute("PRAGMA user_version=3")
         self.store.close()
-        with patch("photography_lib.sqlite_storage.SCHEMA", SCHEMA + ("INVALID SQL",)), self.assertRaises(PhotographyError):
+        with patch("photography_lib.sqlite_storage.SCHEMA", SCHEMA + ("CREATE TABLE migration_probe(id TEXT)", "INVALID SQL")), self.assertRaises(PhotographyError):
             SQLiteStorage(self.config.state_dir)
         with closing(sqlite3.connect(self.config.state_dir / "photography.db")) as db:
             self.assertEqual(db.execute("PRAGMA user_version").fetchone()[0], 3)
-            self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='photo_embeddings'").fetchone())
+            self.assertIsNone(db.execute("SELECT name FROM sqlite_master WHERE name='migration_probe'").fetchone())
 
 
 if __name__ == "__main__":

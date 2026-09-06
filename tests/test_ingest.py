@@ -73,8 +73,6 @@ class IngestionTests(unittest.TestCase):
         source = self.make_photo()
         first = ingest(self.photos, config=self.config)
         original = self.records(first["library_id"])[0]
-        with SQLiteStorage(self.state) as store, store.transaction():
-            store.put_photo(dict(original, needs_analysis=False))
         self.make_photo(color="orange")
         os.utime(source, ns=(source.stat().st_atime_ns, original["mtime_ns"] + 1_000_000_000))
         self.make_photo("second.png")
@@ -82,7 +80,7 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual((second["added"], second["updated"]), (1, 1))
         changed = {p["photo_id"]: p for p in self.records(first["library_id"])}[original["photo_id"]]
         self.assertNotEqual(changed["content_version"], original["content_version"])
-        self.assertTrue(changed["needs_analysis"])
+        self.assertNotIn("needs_analysis", changed)
         self.assertIn(original["photo_id"], second["changed_photo_ids"])
 
     def test_timestamp_only_change_reuses_preview(self):
@@ -96,13 +94,11 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual((second["unchanged"], second["updated"]), (1, 0))
         self.assertEqual(self.records(first["library_id"])[0]["mtime_ns"], stamp)
 
-    def test_missing_is_new_transition_and_restore_reuses_identity_and_analysis_flag(self):
+    def test_missing_is_new_transition_and_restore_reuses_input_identity(self):
         source = self.make_photo()
         contents = source.read_bytes()
         first = ingest(self.photos, config=self.config)
         original = self.records(first["library_id"])[0]
-        with SQLiteStorage(self.state) as store, store.transaction():
-            store.put_photo(dict(original, needs_analysis=False))
         source.unlink()
         missing = ingest(self.photos, config=self.config)
         again = ingest(self.photos, config=self.config)

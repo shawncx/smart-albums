@@ -254,7 +254,7 @@ class AnalysisTests(unittest.TestCase):
             store.db.execute("PRAGMA user_version=1")
         with SQLiteStorage(self.config.state_dir) as store:
             self.assertEqual(store.photos_for_library(self.library_id), original)
-            self.assertEqual(store.db.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(store.db.execute("PRAGMA user_version").fetchone()[0], 5)
         backups = list((self.config.state_dir / "backups").glob("*.db"))
         self.assertEqual(len(backups), 1)
         with closing(sqlite3.connect(backups[0])) as backup:
@@ -284,11 +284,12 @@ class AnalysisTests(unittest.TestCase):
         for options, count in ((["--limit", "2"], 2), (["--all"], 3)):
             process = subprocess.run([*command, "--dry-run", *options], cwd=self.base,
                                      env=env, capture_output=True, encoding="utf-8")
-            self.assertEqual(process.returncode, 2, process.stderr)
+            self.assertEqual(process.returncode, 0, process.stderr)
             result = json.loads(process.stdout)
-            self.assertEqual((result["status"], result["pending"]), ("blocked", count))
+            self.assertEqual((result["status"], result["pending"]), ("proposed", count))
         process = subprocess.run(command, env=env, capture_output=True, encoding="utf-8")
-        self.assertEqual(json.loads(process.stdout)["error"]["code"], "MODEL_CREDENTIAL_MISSING")
+        self.assertEqual(json.loads(process.stdout)["model_calls"], 0)
+        self.assertEqual(json.loads(process.stdout)["status"], "proposed")
 
     def test_report_uses_only_matching_saved_results_and_escapes_model_text(self):
         data = copy.deepcopy(SAMPLE)
@@ -411,7 +412,15 @@ class OpenAIAdapterTests(unittest.TestCase):
                 process = subprocess.run(command, cwd=base, env=env, capture_output=True, encoding="utf-8")
                 self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
                 result = json.loads(process.stdout)
-                self.assertEqual(result[expected], 1)
+                if expected == "analyzed":
+                    self.assertEqual(len(self.requests), 0)
+                    execute = [*command[:4], "analysis-execute", result["plan_id"], "--confirm", result["digest"]]
+                    process = subprocess.run(execute, cwd=base, env=env, capture_output=True, encoding="utf-8")
+                    self.assertEqual(process.returncode, 0, process.stdout + process.stderr)
+                    result = json.loads(process.stdout)
+                    self.assertEqual(result["summary"]["counts"][expected], 1)
+                else:
+                    self.assertEqual(result[expected], 1)
                 self.assertNotIn("unit-test-secret", process.stdout)
             self.assertEqual(len(self.requests), 1)
 

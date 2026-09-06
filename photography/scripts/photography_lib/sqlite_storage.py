@@ -11,6 +11,7 @@ from uuid import uuid4
 
 from .config import PhotographyError
 from .thumbnails import MAX_PREVIEW_BYTES, validate_preview
+from .workflow_storage import WORKFLOW_SCHEMA, WorkflowStorage
 
 
 def now() -> str:
@@ -74,7 +75,7 @@ SCHEMA = (
 )
 
 
-class SQLiteStorage:
+class SQLiteStorage(WorkflowStorage):
     def __init__(self, state_dir: Path):
         self.db = None
         try:
@@ -83,7 +84,7 @@ class SQLiteStorage:
             self.db.row_factory = sqlite3.Row
             self.db.execute("PRAGMA foreign_keys=ON")
             version = self.db.execute("PRAGMA user_version").fetchone()[0]
-            if version in (1, 2, 3):
+            if version in (1, 2, 3, 4):
                 # Keep a consistent pre-migration snapshot, including analysis history.
                 backup_dir = state_dir / "backups"
                 backup_dir.mkdir(exist_ok=True)
@@ -91,13 +92,15 @@ class SQLiteStorage:
                     self.db.backup(backup)
             with self.transaction():
                 version = self.db.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1, 2, 3, 4):
+                if version not in (0, 1, 2, 3, 4, 5):
                     raise PhotographyError("SCHEMA_UNSUPPORTED", f"Unsupported database schema: {version}.")
                 for statement in SCHEMA:
                     self.db.execute(statement)
+                for statement in WORKFLOW_SCHEMA:
+                    self.db.execute(statement)
                 if version in (1, 2):
                     self._migrate_thumbnails(state_dir)
-                self.db.execute("PRAGMA user_version=4")
+                self.db.execute("PRAGMA user_version=5")
         except (OSError, sqlite3.Error) as exc:
             self.close()
             raise PhotographyError("STORAGE_UNAVAILABLE", str(exc)) from exc

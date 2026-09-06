@@ -312,7 +312,7 @@ class SearchTests(unittest.TestCase):
         self.store.close()
         self.store = SQLiteStorage(self.config.state_dir)
         self.addCleanup(self.store.close)
-        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], 4)
+        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], 5)
         self.assertEqual(before, [tuple(r) for r in self.store.db.execute("SELECT * FROM thumbnails ORDER BY photo_id")])
         self.assertEqual(analyses, [tuple(r) for r in self.store.db.execute("SELECT * FROM analyses ORDER BY analysis_id")])
         backup = next((self.config.state_dir / "backups").glob("schema-v3-*.db"))

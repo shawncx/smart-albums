@@ -67,7 +67,7 @@ def parser():
     events.add_argument("--limit", type=int, default=100)
     events.add_argument("--after", type=int, default=0)
     events.add_argument("--changes-only", action="store_true")
-    analysis = commands.add_parser("analyze", help="Analyze indexed JPEG previews with a vision model.")
+    analysis = commands.add_parser("analyze", aliases=["analysis-plan"], help="Propose analysis; execution requires a separately confirmed plan.")
     analysis.add_argument("photo_ids", nargs="*")
     selection = analysis.add_mutually_exclusive_group()
     selection.add_argument("--ids-file", help="UTF-8 JSON array of photo IDs.")
@@ -80,11 +80,13 @@ def parser():
     analysis.add_argument("--pending-only", action="store_true", help="Select only photos without matching saved results before applying the limit.")
     analysis.add_argument("--dry-run", action="store_true", help="Validate previews and inspect cache/configuration without model calls.")
     analysis.add_argument("--model", help="Override PHOTOGRAPHY_MODEL.")
-    analysis.add_argument("--provider", choices=("openai", "codex"), default="openai")
-    analysis.add_argument("--reasoning", choices=("low", "medium", "high", "xhigh"), default="low")
-    analysis.add_argument("--language", choices=("zh-CN", "en"), default="zh-CN")
+    analysis.add_argument("--provider", choices=("openai", "codex"))
+    analysis.add_argument("--reasoning", choices=("low", "medium", "high", "xhigh"))
+    analysis.add_argument("--language", choices=("zh-CN", "en"))
     analysis.add_argument("--timeout", type=float, help="Per-attempt timeout; OpenAI 60s, Codex 240s by default.")
-    analysis.add_argument("--retries", type=int, default=2)
+    analysis.add_argument("--retries", type=int)
+    from .workflow_cli import add_commands
+    add_commands(commands, analysis)
     record = commands.add_parser("analysis", help="Read a saved structured analysis.")
     record.add_argument("analysis_id")
     history = commands.add_parser("analyses", help="Page through a photo's analysis history, oldest first.")
@@ -195,6 +197,9 @@ def main(argv=None):
             with SQLiteStorage(config.state_dir) as store:
                 if args.command in ("embed", "embedding-status", "search", "search-add"):
                     result = local_search_command(args, config, store)
+                elif args.command in ("analyze", "analysis-plan", "analysis-config", "analysis-confirm", "analysis-execute", "analysis-resume", "analysis-job", "analysis-collect", "analysis-cancel", "analysis-cleanup", "analysis-recover"):
+                    from .workflow_cli import command
+                    result = command(args, store, config)
                 elif args.command == "libraries":
                     result = {"libraries": store.libraries()}
                 elif args.command == "albums":
@@ -232,23 +237,6 @@ def main(argv=None):
                     result = store.scan(args.scan_id)
                 elif args.command == "scan-events":
                     result = store.events(args.scan_id, args.limit, args.after, args.changes_only)
-                elif args.command == "analyze":
-                    if args.provider == "codex":
-                        provider = CodexCLIProvider(CodexConfig(model=args.model or CodexConfig.model,
-                            language=args.language, reasoning=args.reasoning,
-                            timeout=args.timeout if args.timeout is not None else 240))
-                    else:
-                        provider = OpenAIResponsesProvider(AnalysisConfig.from_env(
-                            model=args.model, language=args.language, timeout=args.timeout, retries=args.retries))
-                    ids = selected_ids(args, store, provider)
-                    if ids:
-                        result = analyze(ids, config=config, storage=store,
-                                         provider=provider, force=args.force, dry_run=args.dry_run)
-                    elif args.album_id or args.library_id:
-                        result = {"status": "completed", "requested": 0, "analyzed": 0, "cached": 0,
-                                  "failed": 0, "results": [], "model_calls": 0, "dry_run": args.dry_run}
-                    else:
-                        raise PhotographyError("INVALID_ARGUMENT", "Provide photo IDs or a library/album selection.")
                 elif args.command == "analysis":
                     result = store.analysis(args.analysis_id)
                 elif args.command == "analyses":

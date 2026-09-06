@@ -45,9 +45,10 @@ Visual analysis is a separate, explicitly invoked operation. The default provide
 
 ```text
 python photography/scripts/photography.py --state-dir <state-directory> analyze --album-id <album-id> --limit 3
+python photography/scripts/photography.py --state-dir <state-directory> analysis-execute <plan-id> --confirm <reviewed-digest>
 ```
 
-The selected provider receives generated JPEG previews. Never commit API keys or runtime credentials. See the [analysis reference](photography/references/analyze.md) for configuration and cache behavior.
+The first command proposes work and does not call a model. Review the channel/model, cache counts, immediate or asynchronous mode, photos per request, concurrency and estimates before confirming the exact proposal. OpenAI Batch and optional multi-image immediate requests are supported for the documented model catalog; existing Codex login uses single-photo immediate processing. Defaults remain one photo per request. Never commit API keys or runtime credentials. See the [planning and execution workflow](photography/references/analysis-workflow.md) and [observation/cache reference](photography/references/analyze.md). Live service behavior and multi-image quality require a separately authorized trial; regression tests are offline.
 
 ## Local multilingual search
 

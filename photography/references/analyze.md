@@ -1,5 +1,7 @@
 # Visual analysis
 
+For current user-facing entry points, read [Plan and execute visual analysis](analysis-workflow.md). Since schema v5, `analyze` creates a proposal and `analysis-execute` requires its confirmed digest. The single-photo Python function `analyze()` remains available internally. Its legacy retry/dry-run behavior is distinguished below; it is not the Skill's confirmation workflow.
+
 Album selection, credential-free status and SQLite previews are implemented in schema v3; see [albums and saved results](albums.md). Importing or creating an album never invokes analysis automatically.
 
 ## Optional local Codex login
@@ -42,7 +44,9 @@ The endpoint must support Responses image input and strict JSON Schema. HTTPS is
 
 Only the generated JPEG preview and a generic description request are sent. Original paths, original photo bytes and original EXIF are not included. Requests set `store: false`; this is not a claim of zero provider retention. Observations and usage counters are saved locally; credentials, image data URLs and raw provider errors are not saved.
 
-## Commands
+## Photo selection and legacy low-level behavior
+
+The commands below now select photos and create proposals only. Follow the workflow reference to confirm and execute. The exact invocation-time configuration is returned in the proposal; saved defaults can override the initial defaults listed above.
 
 All examples use placeholders. Resolve IDs with `libraries` and `photos`; retain the same `--state-dir`.
 
@@ -57,15 +61,15 @@ python <skill>/scripts/photography.py --state-dir <state> analyze <photo-id> --f
 
 Library or `--album-id` selection defaults to five photos sorted by relative filename and photo ID. Use `--limit N` for another sample or `--all` for the whole selection. `--pending-only` excludes matching saved results before the limit; unavailable candidates remain visible as preflight errors. Empty album/filter selections return zero work; explicit empty ID lists are invalid. IDs files contain a UTF-8 JSON array of strings (a BOM is accepted). Explicit IDs, a file, a library and an album are alternative selections. IDs are deduplicated in first-occurrence order.
 
-`--dry-run` validates originals and stored image bytes and inspects exact cache matches without model calls or inserting analyses/runs. It can initialize/upgrade the database; v1/v2 are backed up before transactional migration to v3. Dry-run returns `requested`, `pending`, `cached`, `failed`, per-photo results and a public analysis profile. `status: blocked` with `MODEL_CREDENTIAL_MISSING` means valid previews exist but credentials are required for analysis. If every result is cached, no credential is required. For browsing or import follow-up, use `analysis-status` instead: it never checks credentials and can read saved metadata with originals offline.
+The CLI `--dry-run` validates originals, thumbnails and caches, does not check credentials, and does not save a proposal. Opening the database may initialize/upgrade it with a backup before migration to v5. The internal Python `analyze(dry_run=True)` retains its old readiness check and may report `MODEL_CREDENTIAL_MISSING`; do not use that internal path for user-facing planning. For browsing or import follow-up, `analysis-status` reads saved metadata with originals offline.
 
-Actual analysis returns `run_id`, timestamps, the ordered unique `photo_ids`, `requested`, `analyzed`, `cached`, `failed`, public configuration and `results`. Each result contains `photo_id`, status and either `analysis_id` or an error. At completion:
+The legacy Python executor returns `run_id`, timestamps, ordered unique `photo_ids`, counts, public configuration and `results`. Each result contains `photo_id`, status and either `analysis_id` or an error. Its completion equation is:
 
 ```text
 requested = analyzed + cached + failed
 ```
 
-Exit codes: `0` completed/ready, `1` partial or all-photo failure, `2` invalid input/configuration/storage or blocked dry-run, `130` interrupted. Missing credentials are a call-level error before an actual run is created. Authentication or incompatible request failures discovered during the run stop further model calls and mark remaining inputs failed. Individual photo/output/network errors otherwise allow subsequent photos to continue.
+CLI exit codes: `0` successfully returned a proposal/status or completed execution, `1` partial/failed execution, `2` invalid input/configuration/storage or blocked operation, `130` interrupted. Always inspect the JSON status: success returning a proposed, paused or submitted plan is not proof that photos were analyzed. The workflow records additional pending/stale/uncertain states; use its summary rather than the legacy equation above.
 
 ## Saved observations
 
@@ -92,7 +96,7 @@ The program checks indexed state, original file size/mtime and the actual previe
 
 No database transaction is held during a model call. Before committing, the code rechecks the current indexed content version, preview profile/bytes and source size/mtime. It atomically saves the observation, photo analysis flag and batch checkpoint. Results for changed photos are discarded. Per-photo checkpoints survive later failures. Keyboard interruption records failures for unfinished photos. A hard process termination can leave a run marked `running`; already committed results remain valid. Reissue the same selection to reuse them and finish the rest.
 
-The first version is serial. Concurrent analysis processes can both pay for the same uncached image; there is no cross-process claim/deduplication mechanism. Concurrent ingestion is checked before commit. Avoid launching duplicate analysis runs on the same selection.
+The legacy Python executor is serial and has no cross-process claims. The confirmed workflow adds persistent input claims and bounded concurrency. It checks versions before submission and commit, keeps uncertain requests reserved, and uses explicit recovery; see the workflow reference. Avoid bypassing it with direct low-level Python calls.
 
 ## Query and display
 

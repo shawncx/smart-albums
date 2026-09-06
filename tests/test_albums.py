@@ -219,7 +219,7 @@ class AlbumTests(unittest.TestCase):
         run = analyze([self.ids[0]], config=self.config, provider=provider)
         originals = self.legacy()
         with SQLiteStorage(self.config.state_dir) as store:
-            self.assertEqual(store.db.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(store.db.execute("PRAGMA user_version").fetchone()[0], 5)
             self.assertEqual(store.albums(), [])
             for old in originals:
                 expected = {k: v for k, v in old.items() if k != "thumbnail_path"}

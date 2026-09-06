@@ -20,7 +20,7 @@ sys.path.insert(0, str(PROJECT / "photography" / "scripts"))
 
 from photography_lib.fingerprints import fingerprint
 from photography_lib.config import PhotographyError
-from photography_lib import index_profiles
+from photography_lib import image_embedding_profiles
 from photography_lib import siglip_embedding as adapter
 from photography_lib.image_vectors import pack_vector, unpack_vector, validate_vector
 
@@ -74,7 +74,7 @@ class Response(io.BytesIO):
 
 class ProfileAndVectorTests(unittest.TestCase):
     def test_profile_is_fresh_immutable_json_and_path_independent(self):
-        first, second = index_profiles.default_profile(), index_profiles.default_profile()
+        first, second = image_embedding_profiles.default_profile(), image_embedding_profiles.default_profile()
         self.assertIsNot(first, second)
         self.assertIsNot(first["model"], second["model"])
         self.assertEqual(first, json.loads(json.dumps(second)))
@@ -87,10 +87,20 @@ class ProfileAndVectorTests(unittest.TestCase):
         one = adapter.SiglipEncoder(PROJECT / "one").profile()
         two = adapter.SiglipEncoder(PROJECT / "two").profile()
         self.assertEqual(fingerprint(one), fingerprint(two))
-        self.assertNotEqual(index_profiles.default_model_dir("one"), index_profiles.default_model_dir("two"))
+        self.assertNotEqual(image_embedding_profiles.default_model_dir("one"),
+                            image_embedding_profiles.default_model_dir("two"))
+        cache = PROJECT / "models"
+        self.assertEqual(image_embedding_profiles.default_model_dir(cache),
+                         cache / "siglip2-base-patch16-224" / image_embedding_profiles.REVISION)
 
     def test_official_identity_and_manifest(self):
-        profile = index_profiles.default_profile()
+        profile = image_embedding_profiles.default_profile()
+        self.assertEqual(profile["profile_schema"], "image-embedding-profile-v1")
+        self.assertEqual(profile["embedding_kind"], "image_text_semantic")
+        self.assertEqual(profile["stored_modality"], "image")
+        self.assertEqual(profile["input_scope"], "stored_thumbnail")
+        self.assertEqual(profile["granularity"], "whole_image")
+        self.assertNotIn("schema", profile)
         self.assertEqual(profile["model"]["revision"], "75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2")
         self.assertEqual(profile["model"]["repo"], "google/siglip2-base-patch16-224")
         self.assertEqual(profile["dimensions"], 768)
@@ -110,18 +120,18 @@ class ProfileAndVectorTests(unittest.TestCase):
 
     def test_requirements_match_runtime_identity(self):
         requirements = (PROJECT / "photography" / "requirements-index.txt").read_text()
-        for package, version in index_profiles.RUNTIME_PACKAGES.items():
+        for package, version in image_embedding_profiles.RUNTIME_PACKAGES.items():
             self.assertIn(f"{package}=={version}", requirements)
         self.assertIn("https://download.pytorch.org/whl/cpu", requirements)
 
     def test_unknown_profile_is_rejected_even_if_dimensions_match(self):
-        profile = json.loads(json.dumps(index_profiles.default_profile()))
+        profile = json.loads(json.dumps(image_embedding_profiles.default_profile()))
         profile["image"]["crop"] = True
         for unsupported in (profile, {"dimensions": 768}, [], "unknown"):
             with self.subTest(profile=unsupported), self.assertRaises(PhotographyError) as caught:
                 adapter.SiglipEncoder(PROJECT, unsupported)
             self.assertEqual(caught.exception.code, "INDEX_MODEL_INVALID")
-        supported = json.loads(json.dumps(index_profiles.default_profile()))
+        supported = json.loads(json.dumps(image_embedding_profiles.default_profile()))
         self.assertEqual(adapter.SiglipEncoder(PROJECT, supported).profile(), supported)
 
     def test_little_endian_float32_unit_roundtrip(self):
@@ -164,13 +174,16 @@ class LocalFixtureTests(unittest.TestCase):
         self.data = {
             "config.json": b'{"model_type":"siglip"}',
             "model.safetensors": b"synthetic test bytes, never loaded",
+            "preprocessor_config.json": b'{"fake":"image-processor"}',
+            "special_tokens_map.json": b'{"fake":"special-tokens"}',
             "tokenizer.json": b'{"fake":true}',
+            "tokenizer_config.json": b'{"fake":"tokenizer-config"}',
         }
         self.manifest = {
             name: {"size": len(data), "sha256": hashlib.sha256(data).hexdigest()}
             for name, data in self.data.items()
         }
-        self.files_patch = patch.object(index_profiles, "FILES", self.manifest)
+        self.files_patch = patch.object(image_embedding_profiles, "FILES", self.manifest)
         self.files_patch.start()
         self.addCleanup(self.files_patch.stop)
         self.runtime_patch = patch.object(adapter, "_check_runtime", return_value={"test": "mocked"})
@@ -261,12 +274,21 @@ class LocalFixtureTests(unittest.TestCase):
         self.assertEqual(adapter.SiglipEncoder(directory).check_ready()["status"], "ready")
 
     def test_legacy_generation_names_remain_readable(self):
-        generation = fingerprint(index_profiles.default_profile()) + "-" + uuid.uuid4().hex
+        old_profile = json.loads(json.dumps(image_embedding_profiles.default_profile()))
+        for key in ("profile_schema", "embedding_kind", "stored_modality", "input_scope", "granularity"):
+            old_profile.pop(key)
+        old_profile["schema"] = "image-index-profile-v1"
+        self.assertNotEqual(fingerprint(old_profile), fingerprint(image_embedding_profiles.default_profile()))
+        generation = fingerprint(old_profile) + "-" + uuid.uuid4().hex
         self.write_model(self.root / ".snapshots" / generation)
         (self.root / "CURRENT").write_text(generation + "\n", encoding="ascii")
+        before = {name: (self.root / ".snapshots" / generation / name).read_bytes() for name in self.data}
         with patch.object(adapter, "_download_file", side_effect=AssertionError("Must reuse old installation")):
             result = adapter.setup_model(self.root)
         self.assertEqual(result["downloaded_files"], [])
+        self.assertEqual(set(result["reused_files"]), set(self.data))
+        self.assertEqual((self.root / "CURRENT").read_text(encoding="ascii").strip(), generation)
+        self.assertEqual({name: (self.root / ".snapshots" / generation / name).read_bytes() for name in self.data}, before)
         self.assertEqual(adapter.SiglipEncoder(self.root).check_ready()["status"], "ready")
 
     def test_published_directory_is_checked_before_pointer_changes(self):
@@ -378,8 +400,8 @@ class LocalFixtureTests(unittest.TestCase):
         adapter._download_file(name, destination, self.manifest[name])
         self.assertEqual(destination.read_bytes(), self.data[name])
         request = self.network.call_args.args[0]
-        self.assertIn(index_profiles.REVISION, request.full_url)
-        self.assertIn(index_profiles.REPO, request.full_url)
+        self.assertIn(image_embedding_profiles.REVISION, request.full_url)
+        self.assertIn(image_embedding_profiles.REPO, request.full_url)
         self.assertFalse((self.root / (name + ".part")).exists())
 
     def test_partial_download_resumes_and_ignored_range_restarts(self):
@@ -568,9 +590,9 @@ class RuntimeMetadataTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "INDEX_MODEL_INVALID")
 
     def test_supported_package_metadata_never_imports_runtime(self):
-        with patch.object(importlib.metadata, "version", side_effect=index_profiles.RUNTIME_PACKAGES.__getitem__), \
+        with patch.object(importlib.metadata, "version", side_effect=image_embedding_profiles.RUNTIME_PACKAGES.__getitem__), \
                 patch.object(adapter, "_load_runtime", side_effect=AssertionError("No load")):
-            self.assertEqual(adapter._check_runtime(), index_profiles.RUNTIME_PACKAGES)
+            self.assertEqual(adapter._check_runtime(), image_embedding_profiles.RUNTIME_PACKAGES)
 
     def test_wrong_python_has_precise_environment_guidance(self):
         with patch.object(adapter.sys, "version_info", (3, 13, 0)):

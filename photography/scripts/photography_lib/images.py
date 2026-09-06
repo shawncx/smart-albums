@@ -97,7 +97,7 @@ def inspect_photo(path: Path, old: dict | None, config: Config, *, preview_reusa
             if signature(before_path) != signature(before):
                 raise PhotographyError("FILE_CHANGED_DURING_SCAN", "The photo changed before it could be read.")
             digest = hashlib.file_digest(source, "sha256").hexdigest()
-            reusable = (old is not None and old["content_hash"] == digest
+            reusable = (old is not None and old["content_version"] == digest
                         and old["thumbnail_profile"] == config.thumbnail_profile
                         and preview_reusable)
             source.seek(0)
@@ -108,7 +108,7 @@ def inspect_photo(path: Path, old: dict | None, config: Config, *, preview_reusa
             after = path.stat(follow_symlinks=False)
             if signature(before) != signature(after):
                 raise PhotographyError("FILE_CHANGED_DURING_SCAN", "The photo changed while it was being read; rescan it.")
-        return {"content_hash": digest, "size_bytes": before.st_size,
+        return {"content_version": digest, "size_bytes": before.st_size,
                 "mtime_ns": before.st_mtime_ns, "metadata": metadata}, thumbnail
     except PhotographyError:
         raise

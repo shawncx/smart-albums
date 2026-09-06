@@ -48,7 +48,7 @@ RUNTIME_PACKAGES = {
 
 
 def _immutable(*args, **kwargs):
-    raise TypeError("Index profiles are immutable.")
+    raise TypeError("Image-embedding profiles are immutable.")
 
 
 class _FrozenDict(dict):
@@ -77,7 +77,11 @@ def _freeze(value):
 def default_profile() -> dict:
     """Return a fresh, JSON-compatible, deeply immutable supported identity."""
     return _freeze({
-        "schema": "image-index-profile-v1",
+        "profile_schema": "image-embedding-profile-v1",
+        "embedding_kind": "image_text_semantic",
+        "stored_modality": "image",
+        "input_scope": "stored_thumbnail",
+        "granularity": "whole_image",
         "model": {
             "repo": REPO,
             "revision": REVISION,
@@ -144,5 +148,5 @@ def default_profile() -> dict:
     })
 
 
-def default_model_dir(state_dir) -> Path:
-    return Path(state_dir).expanduser() / "models" / "siglip2-base-patch16-224" / REVISION
+def default_model_dir(model_cache_root) -> Path:
+    return Path(model_cache_root).expanduser() / "siglip2-base-patch16-224" / REVISION

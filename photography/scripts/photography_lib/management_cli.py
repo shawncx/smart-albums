@@ -1,4 +1,4 @@
-"""Argument handling for the read-only management command tree."""
+"""Management commands for the one explicitly selected album file."""
 from __future__ import annotations
 
 import json
@@ -8,82 +8,89 @@ from .config import PhotographyError
 from .exports import export_path
 
 
-def _scope(parser):
-    scope = parser.add_mutually_exclusive_group()
-    scope.add_argument("--album-id")
-    scope.add_argument("--library-id")
-
-
 def _view_options(parser, *, page=True):
-    parser.add_argument("--profile-id", help="Index profile to inspect; otherwise use the saved default, if any.")
-    parser.add_argument("--output", help="Export a UTF-8 JSON snapshot outside state and source directories.")
+    parser.add_argument("--profile-id", help="Image-embedding profile; otherwise inspect the saved default, if any.")
+    parser.add_argument("--output", help="Export a UTF-8 JSON snapshot.")
     parser.add_argument("--html", help="Export a standalone, read-only HTML snapshot.")
     if page:
         parser.add_argument("--limit", type=int, default=100)
         parser.add_argument("--after", default="")
 
 
-def add_commands(commands):
-    root = commands.add_parser("management", help="Read-only album/photo browsing and explicit metadata or semantic search.")
+def add_commands(root_subparsers):
+    root = root_subparsers.add_parser("management", help="Manage the selected album, browse and search its saved photos.")
     actions = root.add_subparsers(dest="management_command", required=True)
-    _view_options(actions.add_parser("albums", help="List albums in stable ID order."))
-    detail = actions.add_parser("album", help="Show an album and a page of its photos.")
-    detail.add_argument("album_id")
-    _view_options(detail)
-    listing = actions.add_parser("photos", help="Browse a photo scope, or all stored photos.")
-    _scope(listing)
-    _view_options(listing)
-    single = actions.add_parser("photo", help="Inspect one stored photo without reading its original.")
+    for name, help_text in (
+        ("create", "Create a new album file without overwriting an existing file."),
+        ("open", "Validate an existing album read-only and show its identity and coverage."),
+    ):
+        _view_options(actions.add_parser(name, help=help_text), page=False)
+    _view_options(actions.add_parser("photos", help="Browse saved photos in stable ID order."))
+    single = actions.add_parser("photo", help="Inspect saved metadata without accessing the original.")
     single.add_argument("photo_id")
     _view_options(single, page=False)
-    search = actions.add_parser("search", help="Literal Unicode metadata matching or exact image-index retrieval.")
+    search = actions.add_parser("search", help="Literal filename/path matching or exact image-embedding retrieval.")
     search.add_argument("query")
     search.add_argument("--mode", choices=("metadata", "semantic"), required=True)
-    search.add_argument("--target", choices=("albums", "photos"))
-    search.add_argument("--model-dir", help="Local model installation directory; semantic search only, never downloads.")
-    _scope(search)
     _view_options(search, page=False)
     search.add_argument("--limit", type=int, help="1–1000; metadata default 100, semantic default 10.")
-    search.add_argument("--after", help="Stable ID cursor; only valid for metadata search.")
+    search.add_argument("--after", help="Stable photo ID cursor; metadata search only.")
+    locate = actions.add_parser("original", help="Locate an original and explicitly persist any path/status repair.")
+    locate.add_argument("photo_id")
+    relink = actions.add_parser("relink", help="Verify content and bind the photo to an explicit new original path.")
+    relink.add_argument("photo_id")
+    relink.add_argument("--path", required=True, help="Absolute path of an original with identical content.")
+    backup = actions.add_parser("backup", help="Create a consistent SQLite backup at a new destination.")
+    backup.add_argument("--output", required=True)
+    thumbnail = actions.add_parser("thumbnail", help="Export a saved JPEG preview without reading its original.")
+    thumbnail.add_argument("photo_id")
+    thumbnail.add_argument("--output", required=True)
+    scan = actions.add_parser("scan", help="Retrieve a saved ingestion summary.")
+    scan.add_argument("scan_id")
+    events = actions.add_parser("scan-events", help="Page through saved ingestion changes and errors.")
+    events.add_argument("scan_id")
+    events.add_argument("--limit", type=int, default=100)
+    events.add_argument("--after", type=int, default=0)
+    events.add_argument("--changes-only", action="store_true")
 
 
 def command(args, store, config):
     action = args.management_command
-    profile = {"store": store, "profile_id": args.profile_id}
-    if action == "search":
-        if args.mode == "metadata" and args.target is None:
-            raise PhotographyError("INVALID_ARGUMENT", "Metadata search requires --target albums or photos.")
-        if args.mode == "metadata" and args.model_dir is not None:
-            raise PhotographyError("INVALID_ARGUMENT", "--model-dir is only valid for semantic search.")
-        if args.mode == "semantic" and args.target not in (None, "photos"):
-            raise PhotographyError("INVALID_ARGUMENT", "Semantic search supports only --target photos.")
-        if args.mode == "semantic" and args.after is not None:
-            raise PhotographyError("INVALID_ARGUMENT", "Semantic search does not accept --after.")
+    if action == "original":
+        return management.original(args.photo_id, store=store)
+    if action == "relink":
+        return management.relink(args.photo_id, args.path, store=store)
+    if action == "backup":
+        return management.backup(args.output, store=store, config=config)
+    if action == "thumbnail":
+        return management.thumbnail(args.photo_id, args.output, store=store, config=config)
+    if action == "scan":
+        return management.scan(args.scan_id, store=store)
+    if action == "scan-events":
+        return management.scan_events(args.scan_id, store=store, limit=args.limit,
+                                      after=args.after, changes_only=args.changes_only)
+    if action not in ("create", "open", "photos", "photo", "search"):
+        raise PhotographyError("INVALID_ARGUMENT", "Unknown management operation.")
+    if action == "search" and args.mode == "semantic" and args.after is not None:
+        raise PhotographyError("INVALID_ARGUMENT", "Semantic search does not accept --after.")
 
-    # Validate every output before any query encoding, preview decoding, or filesystem writes.
+    # Reject every unsafe target before query encoding, preview decoding or any export writes.
     output = export_path(args.output, config, store, (".json",)) if args.output else None
     html_output = export_path(args.html, config, store, (".html",)) if args.html else None
-    if action == "albums":
-        result = management.albums(**profile, limit=args.limit, after=args.after)
-    elif action == "album":
-        result = management.album(args.album_id, **profile, limit=args.limit, after=args.after)
+    profile = {"store": store, "profile_id": args.profile_id}
+    if action in ("create", "open"):
+        result = management.album_info(**profile, view=action)
     elif action == "photos":
-        result = management.photos(**profile, album_id=args.album_id, library_id=args.library_id,
-                                   limit=args.limit, after=args.after)
+        result = management.photos(**profile, limit=args.limit, after=args.after)
     elif action == "photo":
         result = management.photo(args.photo_id, **profile)
-    elif action == "search":
-        scope = {"album_id": args.album_id, "library_id": args.library_id}
-        if args.mode == "metadata":
-            result = management.metadata_search(args.query, **profile, **scope, target=args.target,
-                                                limit=args.limit if args.limit is not None else 100,
-                                                after=args.after if args.after is not None else "")
-        else:
-            result = management.semantic_search(args.query, **profile, **scope, config=config,
-                                                limit=args.limit if args.limit is not None else 10,
-                                                model_dir=args.model_dir)
+    elif args.mode == "metadata":
+        result = management.metadata_search(args.query, **profile,
+                                            limit=args.limit if args.limit is not None else 100,
+                                            after=args.after if args.after is not None else "")
     else:
-        raise PhotographyError("INVALID_ARGUMENT", "Unknown management operation.")
+        result = management.semantic_search(args.query, **profile, config=config,
+                                            limit=args.limit if args.limit is not None else 10)
     if html_output:
         from .management_report import management_report
 

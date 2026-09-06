@@ -1,22 +1,21 @@
 from __future__ import annotations
 
 import hashlib
-import io
 import importlib
-import json
+import io
 import os
-import subprocess
+from pathlib import Path
+import shutil
 import sys
 import tempfile
 import unittest
-from pathlib import Path
 from unittest.mock import patch
 
-from PIL import Image, ImageCms
+from PIL import Image
 
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "photography" / "scripts"))
-from photography_lib import Config, ingest
+from photography_lib import Config, ingestion
 from photography_lib.config import PhotographyError
 from photography_lib.sqlite_storage import SQLiteStorage
 
@@ -26,277 +25,270 @@ images_module = importlib.import_module("photography_lib.images")
 
 class IngestionTests(unittest.TestCase):
     def setUp(self):
-        self.temporary = tempfile.TemporaryDirectory(prefix="photography-test-")
-        self.addCleanup(self.temporary.cleanup)
-        self.base = Path(self.temporary.name).resolve()
-        self.photos = self.base / "照片库"
-        self.photos.mkdir()
-        self.state = self.base / "state"
-        self.config = Config(self.state, thumbnail_size=256)
+        temporary = tempfile.TemporaryDirectory(prefix="portable-ingestion-")
+        self.addCleanup(temporary.cleanup)
+        self.base = Path(temporary.name).resolve()
+        self.source = self.base / "photos"
+        self.source.mkdir()
+        self.database = self.base / "album.sqlite"
+        self.config = Config(self.database, model_cache_root=self.base / "cache", thumbnail_size=256)
+        SQLiteStorage.create(self.database).close()
 
-    def make_photo(self, name="image.jpg", color="navy", size=(640, 320), **save_options):
-        path = self.photos / name
+    def image(self, name="photo.jpg", size=(640, 320), color="navy", **kwargs):
+        path = self.source / name
         path.parent.mkdir(parents=True, exist_ok=True)
-        Image.new("RGB", size, color).save(path, **save_options)
+        Image.new("RGB", size, color).save(path, **kwargs)
         return path
 
-    def records(self, library_id):
-        with SQLiteStorage(self.state) as store:
-            return store.photos_for_library(library_id)
+    def records(self, database=None):
+        with SQLiteStorage.open(database or self.database) as store:
+            return store.photos()
 
-    def preview(self, photo):
-        with SQLiteStorage(self.state) as store:
+    def thumbnail(self, photo, database=None):
+        with SQLiteStorage.open(database or self.database) as store:
             return store.thumbnail(photo["photo_id"])
 
-    def test_first_import_and_second_scan_are_incremental_and_read_only(self):
-        source = self.make_photo("子目录/照片.JPG")
-        before = source.read_bytes(), source.stat().st_mtime_ns
-        first = ingest(self.photos, config=self.config)
-        self.assertEqual((first["added"], first["scanned"], first["failed"]), (1, 1, 0))
-        photo = self.records(first["library_id"])[0]
-        thumb = self.preview(photo)
-        with Image.open(io.BytesIO(thumb["data"])) as preview:
+    def test_first_import_and_repeat_preserve_original_and_preview(self):
+        path = self.image("nested/photo.JPG")
+        before = path.read_bytes(), path.stat().st_mtime_ns
+        first = ingestion(self.source, config=self.config)
+        photo = self.records()[0]
+        thumbnail = self.thumbnail(photo)
+        self.assertEqual((first["added"], first["scanned"], first["model_calls"]), (1, 1, 0))
+        self.assertEqual(photo["original_absolute_path"], str(path))
+        self.assertEqual(photo["original_relative_path"], "photos/nested/photo.JPG")
+        self.assertEqual(photo["content_version"], hashlib.sha256(before[0]).hexdigest())
+        with Image.open(io.BytesIO(thumbnail["data"])) as preview:
             self.assertEqual(preview.size, (256, 128))
-            self.assertEqual(preview.format, "JPEG")
-        self.assertNotIn("thumbnail_path", photo)
-        self.assertFalse((self.state / "thumbnails").exists())
-        self.assertEqual(photo["content_hash"], hashlib.sha256(before[0]).hexdigest())
-        with patch.object(ingest_module, "inspect_photo", side_effect=AssertionError("Unchanged photo decoded")):
-            second = ingest(self.photos / ".", config=self.config)
-        self.assertEqual(second["library_id"], first["library_id"])
-        self.assertEqual(second["unchanged"], 1)
-        self.assertEqual(second["changed_photo_ids"], [])
-        self.assertEqual(before, (source.read_bytes(), source.stat().st_mtime_ns))
-        self.assertEqual(thumb, self.preview(photo))
+        with patch.object(ingest_module, "inspect_photo", side_effect=AssertionError("No repeat decode")):
+            repeated = ingestion(self.source, config=self.config)
+        self.assertEqual((repeated["unchanged"], repeated["changed_photo_ids"]), (1, []))
+        self.assertEqual(repeated["album"]["id"], first["album"]["id"])
+        self.assertEqual(self.thumbnail(photo), thumbnail)
+        self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
+        self.assertEqual(repeated["index_prompt"]["photo_ids"], first["successful_photo_ids"])
 
-    def test_new_file_and_changed_content_keep_existing_identity(self):
-        source = self.make_photo()
-        first = ingest(self.photos, config=self.config)
-        original = self.records(first["library_id"])[0]
-        self.make_photo(color="orange")
-        os.utime(source, ns=(source.stat().st_atime_ns, original["mtime_ns"] + 1_000_000_000))
-        self.make_photo("second.png")
-        second = ingest(self.photos, config=self.config)
-        self.assertEqual((second["added"], second["updated"]), (1, 1))
-        changed = {p["photo_id"]: p for p in self.records(first["library_id"])}[original["photo_id"]]
-        self.assertNotEqual(changed["content_version"], original["content_version"])
-        self.assertNotIn("needs_analysis", changed)
-        self.assertIn(original["photo_id"], second["changed_photo_ids"])
+    def test_changed_photo_keeps_id_and_reports_new_input(self):
+        path = self.image()
+        ingestion(self.source, config=self.config)
+        old = self.records()[0]
+        self.image(color="orange")
+        os.utime(path, ns=(path.stat().st_atime_ns, old["mtime_ns"] + 1_000_000_000))
+        result = ingestion(self.source, config=self.config)
+        current = self.records()[0]
+        self.assertEqual((result["updated"], current["photo_id"]), (1, old["photo_id"]))
+        self.assertNotEqual(current["content_version"], old["content_version"])
+        self.assertEqual(result["index_prompt"]["photo_ids"], [old["photo_id"]])
 
-    def test_timestamp_only_change_reuses_preview(self):
-        source = self.make_photo()
-        first = ingest(self.photos, config=self.config)
-        original = self.records(first["library_id"])[0]
-        stamp = original["mtime_ns"] + 1_000_000_000
-        os.utime(source, ns=(source.stat().st_atime_ns, stamp))
-        with patch.object(images_module, "_preview", side_effect=AssertionError("Identical bytes decoded")):
-            second = ingest(self.photos, config=self.config)
-        self.assertEqual((second["unchanged"], second["updated"]), (1, 0))
-        self.assertEqual(self.records(first["library_id"])[0]["mtime_ns"], stamp)
+    def test_missing_and_restore_preserve_identity(self):
+        path = self.image()
+        data = path.read_bytes()
+        ingestion(self.source, config=self.config)
+        old = self.records()[0]
+        path.unlink()
+        self.assertEqual(ingestion(self.source, config=self.config)["missing"], 1)
+        self.assertEqual(ingestion(self.source, config=self.config)["missing"], 0)
+        path.write_bytes(data)
+        result = ingestion(self.source, config=self.config)
+        self.assertEqual((result["restored"], result["changed_photo_ids"]), (1, []))
+        self.assertEqual(self.records()[0]["photo_id"], old["photo_id"])
+        self.assertEqual(self.records()[0]["original_status"], "available")
 
-    def test_missing_is_new_transition_and_restore_reuses_input_identity(self):
-        source = self.make_photo()
-        contents = source.read_bytes()
-        first = ingest(self.photos, config=self.config)
-        original = self.records(first["library_id"])[0]
-        source.unlink()
-        missing = ingest(self.photos, config=self.config)
-        again = ingest(self.photos, config=self.config)
-        self.assertEqual((missing["missing"], again["missing"]), (1, 0))
-        source.write_bytes(contents)
-        restored = ingest(self.photos, config=self.config)
-        self.assertEqual(restored["restored"], 1)
-        self.assertEqual(restored["changed_photo_ids"], [])
-        record = self.records(first["library_id"])[0]
-        self.assertEqual(record["photo_id"], original["photo_id"])
-        self.assertEqual(record["state"], "available")
-
-    def test_missing_preview_and_changed_profile_are_repaired(self):
-        self.make_photo()
-        first = ingest(self.photos, config=self.config)
-        original = self.records(first["library_id"])[0]
-        with SQLiteStorage(self.state) as store:
-            store.db.execute("DELETE FROM thumbnails WHERE photo_id=?", (original["photo_id"],))
-        repair = ingest(self.photos, config=self.config)
-        self.assertEqual(repair["updated"], 1)
-        smaller = ingest(self.photos, config=Config(self.state, thumbnail_size=128))
-        self.assertEqual(smaller["updated"], 1)
-        record = self.records(first["library_id"])[0]
-        self.assertEqual(record["metadata"]["thumbnail_width"], 128)
-
-    def test_corrupt_file_does_not_stop_other_photos_and_existing_record_becomes_stale(self):
-        source = self.make_photo()
-        first = ingest(self.photos, config=self.config)
-        original = self.records(first["library_id"])[0]
-        source.write_bytes(b"broken image")
-        self.make_photo("valid.png")
-        second = ingest(self.photos, config=self.config)
-        self.assertEqual((second["status"], second["added"], second["failed"]), ("partial", 1, 1))
-        self.assertEqual(second["errors"][0]["photo_id"], original["photo_id"])
-        stale = {p["photo_id"]: p for p in self.records(first["library_id"])}[original["photo_id"]]
-        self.assertEqual(stale["state"], "error")
-        self.assertEqual(stale["content_hash"], original["content_hash"])
-        self.assertNotIn(original["photo_id"], second["changed_photo_ids"])
-
-    def test_incomplete_directory_walk_never_marks_missing(self):
-        first_path = self.make_photo("a.jpg")
-        second_path = self.make_photo("b.jpg")
-        first = ingest(self.photos, config=self.config)
-        second_path.unlink()
-
-        def interrupted_walk(*args):
-            yield first_path
-            raise PermissionError("Test unreadable subdirectory")
-
-        with patch.object(ingest_module, "_walk", interrupted_walk):
-            with self.assertRaises(PhotographyError) as failure:
-                ingest(self.photos, config=self.config)
-        self.assertEqual(failure.exception.code, "SCAN_INCOMPLETE")
-        self.assertTrue(all(p["state"] == "available" for p in self.records(first["library_id"])))
-        with SQLiteStorage(self.state) as store:
-            record = store.scan(failure.exception.scan_id)
-            self.assertEqual(record["status"], "failed")
-            self.assertEqual(record["result"]["missing"], 0)
-
-    def test_keyboard_interrupt_does_not_mark_missing(self):
-        source = self.make_photo()
-        first = ingest(self.photos, config=self.config)
-        source.unlink()
-        with patch.object(ingest_module, "_walk", side_effect=KeyboardInterrupt):
-            with self.assertRaises(PhotographyError) as failure:
-                ingest(self.photos, config=self.config)
-        self.assertEqual(failure.exception.code, "SCAN_INTERRUPTED")
-        self.assertEqual(self.records(first["library_id"])[0]["state"], "available")
-
-    def test_mid_read_modification_is_not_saved_as_valid(self):
-        source = self.make_photo()
-        real_preview = images_module._preview
-
-        def changing_preview(handle, config):
-            result = real_preview(handle, config)
-            info = source.stat()
-            os.utime(source, ns=(info.st_atime_ns, info.st_mtime_ns + 1_000_000_000))
-            return result
-
-        with patch.object(images_module, "_preview", changing_preview):
-            result = ingest(self.photos, config=self.config)
-        self.assertEqual(result["failed"], 1)
-        self.assertEqual(result["errors"][0]["code"], "FILE_CHANGED_DURING_SCAN")
-        self.assertEqual(self.records(result["library_id"]), [])
-
-    def test_mid_photo_interrupt_preserves_consistent_failed_scan_counts(self):
-        self.make_photo()
-        with patch.object(ingest_module, "inspect_photo", side_effect=KeyboardInterrupt):
-            with self.assertRaises(PhotographyError) as failure:
-                ingest(self.photos, config=self.config)
-        with SQLiteStorage(self.state) as store:
-            result = store.scan(failure.exception.scan_id)["result"]
-        self.assertEqual((result["scanned"], result["failed"], result["missing"]), (1, 1, 0))
-
-    def test_narrowing_format_scope_does_not_mark_excluded_photos_missing(self):
-        self.make_photo()
-        first = ingest(self.photos, config=self.config)
-        result = ingest(self.photos, config=Config(self.state, extensions=(".png",)))
-        self.assertEqual(result["missing"], 0)
-        self.assertEqual(self.records(first["library_id"])[0]["state"], "available")
-
-    def test_exif_orientation_and_metadata(self):
-        exif = Image.Exif()
-        exif[274], exif[271], exif[272] = 6, "Test camera", "Synthetic fixture"
-        self.make_photo(exif=exif)
-        first = ingest(self.photos, config=self.config)
-        record = self.records(first["library_id"])[0]
-        metadata = record["metadata"]
-        self.assertEqual((metadata["display_width"], metadata["display_height"]), (320, 640))
-        self.assertEqual(metadata["exif"]["make"], "Test camera")
-        with Image.open(io.BytesIO(self.preview(record)["data"])) as preview:
-            self.assertEqual(preview.size, (128, 256))
-            self.assertNotIn(274, preview.getexif())
-
-    def test_supported_formats_alpha_small_images_and_color_profile(self):
-        for extension in ("jpg", "png", "webp", "tiff", "bmp"):
-            self.make_photo(f"image.{extension}", size=(80, 40))
-        Image.new("RGBA", (20, 20), (0, 0, 0, 0)).save(self.photos / "transparent.png")
-        self.make_photo("icc.jpg", icc_profile=ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes())
-        result = ingest(self.photos, config=self.config)
-        self.assertEqual((result["added"], result["failed"]), (7, 0))
-        by_name = {p["relative_path"]: p for p in self.records(result["library_id"])}
-        self.assertEqual(by_name["image.jpg"]["metadata"]["thumbnail_width"], 80)
-        self.assertEqual(by_name["icc.jpg"]["metadata"]["color_handling"], "converted_to_srgb")
-        with Image.open(io.BytesIO(self.preview(by_name["transparent.png"])["data"])) as preview:
-            self.assertGreater(min(preview.getpixel((5, 5))), 245)
-
-    def test_multiple_libraries_and_identical_files_keep_separate_records(self):
-        source = self.make_photo()
-        (self.photos / "copy.jpg").write_bytes(source.read_bytes())
-        first = ingest(self.photos, config=self.config)
+    def test_other_directory_records_are_not_marked_missing(self):
+        self.image()
+        ingestion(self.source, config=self.config)
         other = self.base / "other"
         other.mkdir()
-        (other / "image.jpg").write_bytes(source.read_bytes())
-        second = ingest(other, config=self.config)
-        self.assertNotEqual(first["library_id"], second["library_id"])
-        all_photos = self.records(first["library_id"]) + self.records(second["library_id"])
-        self.assertEqual(len({p["photo_id"] for p in all_photos}), 3)
-        self.assertEqual(len({p["content_hash"] for p in all_photos}), 1)
+        Image.new("RGB", (80, 60), "red").save(other / "second.jpg")
+        result = ingestion(other, config=self.config)
+        self.assertEqual((result["added"], result["missing"]), (1, 0))
+        self.assertEqual(len(self.records()), 2)
+        overlap = ingestion(self.base, config=self.config)
+        self.assertEqual((overlap["added"], overlap["unchanged"]), (0, 2))
 
-    def test_invalid_and_overlapping_paths_do_not_write_state(self):
-        for invalid in ("relative-path", self.base / "not-found", self.photos / "state"):
-            with self.assertRaises(PhotographyError):
-                ingest(invalid, config=self.config)
-        self.assertFalse(self.state.exists())
-        with self.assertRaises(PhotographyError) as failure:
-            ingest(self.photos, config=Config(self.photos / "state"))
-        self.assertEqual(failure.exception.code, "STATE_OVERLAPS_LIBRARY")
-        self.assertFalse((self.photos / "state").exists())
+    def test_identical_files_are_not_hash_deduplicated(self):
+        path = self.image()
+        (self.source / "copy.jpg").write_bytes(path.read_bytes())
+        result = ingestion(self.source, config=self.config)
+        self.assertEqual(result["added"], 2)
+        self.assertEqual(len({p["photo_id"] for p in self.records()}), 2)
+        self.assertEqual(len({p["content_version"] for p in self.records()}), 1)
 
-    def test_root_permission_failure_does_not_initialize_database(self):
-        with patch.object(ingest_module.os, "scandir", side_effect=PermissionError("Test denied")):
-            with self.assertRaises(PhotographyError) as failure:
-                ingest(self.photos, config=self.config)
-        self.assertEqual(failure.exception.code, "DIRECTORY_UNREADABLE")
-        self.assertFalse(self.state.exists())
+    def test_database_can_be_inside_photo_directory_and_cache_is_excluded(self):
+        self.image()
+        database = self.source / "inside.sqlite"
+        SQLiteStorage.create(database).close()
+        cache = self.source / "model-cache"
+        cache.mkdir()
+        Image.new("RGB", (40, 40), "white").save(cache / "not-an-original.jpg")
+        config = Config(database, model_cache_root=cache)
+        result = ingestion(self.source, config=config)
+        self.assertEqual((result["scanned"], result["added"]), (1, 1))
+        self.assertEqual(self.records(database)[0]["original_relative_path"], "photo.jpg")
 
-    def test_empty_library_unsupported_and_multipage_files(self):
-        (self.photos / "ignored.raw").write_bytes(b"not supported")
-        empty = ingest(self.photos, config=self.config)
-        self.assertEqual(empty["scanned"], 0)
-        Image.new("RGB", (20, 20)).save(self.photos / "pages.tiff", save_all=True,
-                                      append_images=[Image.new("RGB", (20, 20), "red")])
-        result = ingest(self.photos, config=self.config)
-        self.assertEqual(result["errors"][0]["code"], "MULTIFRAME_UNSUPPORTED")
+    def test_cross_drive_relative_failure_is_warning_not_import_failure(self):
+        self.image()
+        with patch.object(ingest_module, "relative_original_path",
+                          return_value=(None, {"code": "RELATIVE_PATH_UNAVAILABLE", "message": "Different drive"})):
+            result = ingestion(self.source, config=self.config)
+        self.assertEqual(result["added"], 1)
+        self.assertIsNone(self.records()[0]["original_relative_path"])
+        self.assertTrue(result["warnings"])
 
-    def test_paginated_queries_and_persisted_scan_events(self):
-        for number in range(3):
-            self.make_photo(f"{number}.jpg")
-        first = ingest(self.photos, config=self.config)
-        second = ingest(self.photos, config=self.config)
-        with SQLiteStorage(self.state) as store:
-            page1 = store.photos(first["library_id"], limit=2)
-            page2 = store.photos(first["library_id"], limit=2, after=page1["next_cursor"])
-            self.assertEqual(len(page1["items"] + page2["items"]), 3)
-            self.assertIsNone(page2["next_cursor"])
-            events = store.events(first["scan_id"], limit=2)
-            tail = store.events(first["scan_id"], limit=2, after=events["next_cursor"])
-            self.assertEqual(len(events["items"] + tail["items"]), 3)
-            self.assertEqual(store.events(second["scan_id"], changes_only=True)["items"], [])
-            self.assertEqual(store.scan(first["scan_id"])["result"], first)
-            self.assertEqual(store.libraries()[0]["available"], 3)
+    def test_move_album_and_photos_then_rescan_reuses_id_and_preview(self):
+        path = self.image()
+        first = ingestion(self.source, config=self.config)
+        old = self.records()[0]
+        thumbnail = self.thumbnail(old)
+        moved = self.base / "moved"
+        moved.mkdir()
+        new_database = moved / self.database.name
+        shutil.move(self.database, new_database)
+        new_source = moved / "photos"
+        shutil.move(self.source, new_source)
+        config = Config(new_database, model_cache_root=self.base / "cache", thumbnail_size=256)
+        result = ingestion(new_source, config=config)
+        current = self.records(new_database)[0]
+        self.assertEqual((result["added"], result["unchanged"], result["changed_photo_ids"]), (0, 1, []))
+        self.assertEqual(result["album"]["id"], first["album"]["id"])
+        self.assertEqual(current["photo_id"], old["photo_id"])
+        self.assertEqual(current["original_absolute_path"], str(new_source / path.name))
+        self.assertEqual(self.thumbnail(current, new_database), thumbnail)
 
-    def test_cli_is_runnable_from_an_unrelated_working_directory(self):
-        self.make_photo()
-        script = PROJECT / "photography" / "scripts" / "photography.py"
-        args = [sys.executable, str(script), "--state-dir", str(self.state)]
-        first = subprocess.run(args + ["ingest", str(self.photos)], cwd=self.base,
-                               capture_output=True, text=True, encoding="utf-8")
-        self.assertEqual(first.returncode, 0, first.stderr)
-        self.assertEqual(json.loads(first.stdout)["added"], 1)
-        second = subprocess.run(args + ["ingest", str(self.photos)], cwd=self.base,
-                                capture_output=True, text=True, encoding="utf-8")
-        self.assertEqual(json.loads(second.stdout)["unchanged"], 1)
-        failure = subprocess.run(args + ["ingest", "relative"], cwd=self.base,
-                                 capture_output=True, text=True, encoding="utf-8")
-        self.assertEqual(failure.returncode, 2)
-        self.assertEqual(json.loads(failure.stdout)["error"]["code"], "INVALID_PATH")
+    def test_missing_absolute_with_available_relative_elsewhere_is_not_missing(self):
+        path = self.image()
+        ingestion(self.source, config=self.config)
+        backup = self.base / "backup.jpg"
+        shutil.copyfile(path, backup)
+        with SQLiteStorage.open(self.database, writable=True) as store:
+            old = store.photos()[0]
+            store.put_photo({**old, "original_relative_path": "backup.jpg"})
+        path.unlink()
+        result = ingestion(self.source, config=self.config)
+        self.assertEqual(result["missing"], 0)
+        self.assertEqual(self.records()[0]["original_absolute_path"], str(backup))
+
+    def test_existing_absolute_wins_over_a_relative_copy(self):
+        path = self.image()
+        ingestion(self.source, config=self.config)
+        copy = self.base / "copies"
+        copy.mkdir()
+        shutil.copyfile(path, copy / path.name)
+        with SQLiteStorage.open(self.database, writable=True) as store:
+            old = store.photos()[0]
+            store.put_photo({**old, "original_relative_path": "copies/photo.jpg"})
+        result = ingestion(copy, config=self.config)
+        self.assertEqual((result["failed"], result["added"]), (1, 0))
+        self.assertEqual(result["errors"][0]["code"], "PHOTO_PATH_CONFLICT")
+        self.assertEqual(self.records()[0]["original_absolute_path"], str(path))
+
+    def test_bad_photo_is_isolated_and_success_scope_prompts(self):
+        path = self.image()
+        ingestion(self.source, config=self.config)
+        old = self.records()[0]
+        path.write_bytes(b"broken")
+        self.image("valid.jpg", color="green")
+        result = ingestion(self.source, config=self.config)
+        self.assertEqual((result["status"], result["failed"], result["added"]), ("partial", 1, 1))
+        self.assertEqual(result["index_prompt"]["photo_ids"], result["successful_photo_ids"])
+        by_id = {p["photo_id"]: p for p in self.records()}
+        self.assertEqual(by_id[old["photo_id"]]["ingest_state"], "error")
+        self.assertEqual(by_id[old["photo_id"]]["content_version"], old["content_version"])
+
+    def test_preview_write_failure_rolls_back_new_photo(self):
+        self.image()
+        with patch.object(SQLiteStorage, "put_thumbnail", side_effect=PhotographyError("TEST_ERROR", "Save failed")):
+            result = ingestion(self.source, config=self.config)
+        self.assertEqual(result["failed"], 1)
+        self.assertEqual(self.records(), [])
+        self.assertIsNone(result["index_prompt"])
+
+    def test_original_reads_occur_outside_write_transaction(self):
+        self.image()
+        original = ingest_module.inspect_photo
+        with SQLiteStorage.open(self.database, writable=True) as store:
+            def check(*args, **kwargs):
+                self.assertFalse(store.db.in_transaction)
+                return original(*args, **kwargs)
+            with patch.object(ingest_module, "inspect_photo", side_effect=check):
+                self.assertEqual(ingestion(self.source, config=self.config, storage=store)["added"], 1)
+
+    def test_concurrent_path_repair_is_not_overwritten_by_ingestion(self):
+        path = self.image()
+        ingestion(self.source, config=self.config)
+        self.image(size=(300, 100), color="red")
+        original_prepare = ingest_module._prepare
+        with SQLiteStorage.open(self.database, writable=True) as store:
+            old = store.photos()[0]
+            relocated = str(self.base / "concurrent-location.jpg")
+
+            def change_after_read(*args):
+                result = original_prepare(*args)
+                with store.transaction():
+                    store.put_photo({**store.photo(old["photo_id"]), "original_absolute_path": relocated})
+                return result
+
+            with patch.object(ingest_module, "_prepare", side_effect=change_after_read):
+                result = ingestion(self.source, config=self.config, storage=store)
+            self.assertEqual(result["failed"], 1)
+            self.assertEqual(result["errors"][0]["code"], "PHOTO_PATH_CHANGED")
+            self.assertEqual(store.photo(old["photo_id"])["original_absolute_path"], relocated)
+            self.assertEqual(store.photo(old["photo_id"])["content_version"], old["content_version"])
+
+    def test_changing_source_before_save_is_not_persisted_as_success(self):
+        path = self.image()
+        original = ingest_module._prepare
+
+        def change_after_read(*args):
+            result = original(*args)
+            path.write_bytes(b"changed during import")
+            return result
+
+        with patch.object(ingest_module, "_prepare", side_effect=change_after_read):
+            result = ingestion(self.source, config=self.config)
+        self.assertEqual((result["failed"], result["added"]), (1, 0))
+        self.assertEqual(result["errors"][0]["code"], "FILE_CHANGED_DURING_SCAN")
+        self.assertEqual(self.records(), [])
+
+    def test_incomplete_scan_does_not_mark_missing(self):
+        first = self.image()
+        second = self.image("second.jpg")
+        ingestion(self.source, config=self.config)
+        second.unlink()
+        def broken(*args):
+            yield first
+            raise PermissionError("Synthetic enumeration error")
+        with patch.object(ingest_module, "_walk", side_effect=broken), self.assertRaises(PhotographyError) as error:
+            ingestion(self.source, config=self.config)
+        self.assertEqual(error.exception.code, "SCAN_INCOMPLETE")
+        self.assertTrue(all(p["original_status"] == "available" for p in self.records()))
+        with SQLiteStorage.open(self.database) as store:
+            self.assertEqual(store.scan(error.exception.scan_id)["result"]["missing"], 0)
+
+    def test_orientation_small_photos_and_supported_formats(self):
+        exif = Image.Exif()
+        exif[274] = 6
+        self.image(exif=exif)
+        for extension in ("png", "webp", "tif", "bmp"):
+            self.image("small." + extension, size=(40, 20))
+        result = ingestion(self.source, config=self.config)
+        self.assertEqual((result["added"], result["failed"]), (5, 0))
+        for photo in self.records():
+            thumb = self.thumbnail(photo)
+            expected = (128, 256) if photo["original_absolute_path"].endswith("photo.jpg") else (40, 20)
+            self.assertEqual((thumb["width"], thumb["height"]), expected)
+
+    def test_open_does_not_create_missing_database_and_invalid_roots_do_not_write(self):
+        missing = self.base / "does-not-exist.sqlite"
+        self.image()
+        with self.assertRaises(PhotographyError):
+            ingestion(self.source, config=Config(missing))
+        self.assertFalse(missing.exists())
+        for path in ("relative", self.base / "absent", self.database):
+            with self.subTest(path=path), self.assertRaises(PhotographyError):
+                ingestion(path, config=self.config)
+        with SQLiteStorage.open(self.database) as store:
+            self.assertEqual(store.db.execute("SELECT COUNT(*) FROM scans").fetchone()[0], 0)
 
 
 if __name__ == "__main__":

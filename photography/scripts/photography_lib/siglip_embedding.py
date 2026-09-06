@@ -22,7 +22,7 @@ import urllib.error
 import urllib.request
 import uuid
 
-from . import index_profiles
+from . import image_embedding_profiles
 from .fingerprints import fingerprint
 from .config import PhotographyError
 from .image_vectors import pack_vector, unpack_vector, validate_vector
@@ -49,7 +49,7 @@ def _check_runtime() -> dict:
             or platform.machine().lower() not in {"amd64", "x86_64"}):
         raise PhotographyError("INDEX_DEPENDENCY_MISSING", _INSTALL_HELP)
     versions = {}
-    for package, expected in index_profiles.RUNTIME_PACKAGES.items():
+    for package, expected in image_embedding_profiles.RUNTIME_PACKAGES.items():
         try:
             actual = importlib.metadata.version(package)
         except importlib.metadata.PackageNotFoundError as exc:
@@ -93,7 +93,7 @@ def _snapshot_dir(model_dir: Path) -> Path:
 
 def _validate_files(directory: Path):
     missing, invalid = [], []
-    for filename, expected in index_profiles.FILES.items():
+    for filename, expected in image_embedding_profiles.FILES.items():
         path = directory / filename
         if not path.exists():
             missing.append(filename)
@@ -154,7 +154,7 @@ def _download_file(filename: str, destination: Path, expected: dict):
             return
         partial.unlink()
         offset = 0
-    url = f"https://huggingface.co/{index_profiles.REPO}/resolve/{index_profiles.REVISION}/{filename}"
+    url = f"https://huggingface.co/{image_embedding_profiles.REPO}/resolve/{image_embedding_profiles.REVISION}/{filename}"
     headers = {"Accept-Encoding": "identity", "User-Agent": "smart-albums-index-setup/1"}
     if offset:
         headers["Range"] = f"bytes={offset}-"
@@ -203,7 +203,7 @@ def setup_model(model_dir) -> dict:
     """The sole network path. Staging is resumable; CURRENT changes atomically."""
     _check_runtime()
     root = Path(model_dir).expanduser().resolve()
-    profile = index_profiles.default_profile()
+    profile = image_embedding_profiles.default_profile()
     profile_id = fingerprint(profile)
     downloaded, reused = [], []
     try:
@@ -218,10 +218,10 @@ def setup_model(model_dir) -> dict:
                 current = root
                 invalid_pointer = True
             valid_current = {
-                name for name, expected in index_profiles.FILES.items()
+                name for name, expected in image_embedding_profiles.FILES.items()
                 if _file_valid(current / name, expected)
             }
-            if len(valid_current) == len(index_profiles.FILES) and not invalid_pointer:
+            if len(valid_current) == len(image_embedding_profiles.FILES) and not invalid_pointer:
                 reused = sorted(valid_current)
             else:
                 snapshots = root / ".snapshots"
@@ -233,15 +233,15 @@ def setup_model(model_dir) -> dict:
                     if candidate.is_dir() and not candidate.is_symlink()
                     and re.fullmatch(_GENERATION_PATTERN, candidate.name)
                     and all(_file_valid(candidate / name, expected)
-                            for name, expected in index_profiles.FILES.items())
+                            for name, expected in image_embedding_profiles.FILES.items())
                 ), None)
                 if ready is not None:
-                    reused = list(index_profiles.FILES)
+                    reused = list(image_embedding_profiles.FILES)
                     generation = ready.name
                 else:
                     stage = root / ".staging" / profile_id
                     stage.mkdir(parents=True, exist_ok=True)
-                    for name, expected in index_profiles.FILES.items():
+                    for name, expected in image_embedding_profiles.FILES.items():
                         destination = stage / name
                         if _file_valid(destination, expected):
                             reused.append(name)
@@ -261,14 +261,14 @@ def setup_model(model_dir) -> dict:
     except OSError as exc:
         raise PhotographyError("INDEX_MODEL_INVALID", f"Cannot publish model installation: {exc}") from exc
     return {
-        "status": "ready",
+        "status": "ready", "component": "image_embedding",
         "model_dir": str(root),
         "profile": profile,
         "profile_id": profile_id,
         "downloaded_files": downloaded,
         "reused_files": reused,
-        "total_bytes": sum(item["size"] for item in index_profiles.FILES.values()),
-        "downloaded_bytes": sum(index_profiles.FILES[name]["size"] for name in downloaded),
+        "total_bytes": sum(item["size"] for item in image_embedding_profiles.FILES.values()),
+        "downloaded_bytes": sum(image_embedding_profiles.FILES[name]["size"] for name in downloaded),
     }
 
 
@@ -294,11 +294,11 @@ def _decode_jpeg(data: bytes):
 
 class SiglipEncoder:
     def __init__(self, model_dir, profile=None):
-        expected = index_profiles.default_profile()
+        expected = image_embedding_profiles.default_profile()
         try:
             supported = profile is None or fingerprint(profile) == fingerprint(expected)
         except (TypeError, ValueError) as exc:
-            raise PhotographyError("INDEX_MODEL_INVALID", "Unsupported index profile.") from exc
+            raise PhotographyError("INDEX_MODEL_INVALID", "Unsupported image-embedding profile.") from exc
         if not supported:
             raise PhotographyError("INDEX_MODEL_INVALID", "Only the exact built-in SigLIP2 profile is supported.")
         self.model_dir = Path(model_dir).expanduser().resolve()
@@ -308,7 +308,7 @@ class SiglipEncoder:
         self.load_seconds = 0.0
 
     def profile(self) -> dict:
-        return index_profiles._freeze(self._profile)
+        return image_embedding_profiles._freeze(self._profile)
 
     def check_ready(self) -> dict:
         """Full file hashes and installed package metadata, never model loading."""
@@ -316,7 +316,7 @@ class SiglipEncoder:
         _validate_files(directory)
         runtime = _check_runtime()
         return {
-            "status": "ready", "model_dir": str(self.model_dir),
+            "status": "ready", "component": "image_embedding", "model_dir": str(self.model_dir),
             "profile_id": fingerprint(self._profile), "runtime": runtime,
         }
 

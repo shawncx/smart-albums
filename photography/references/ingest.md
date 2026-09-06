@@ -1,38 +1,36 @@
 # ingestion: metadata and proportional previews
 
-Ingestion is independent of models and indexing. It reads source photos, records their paths/metadata and saves JPEG previews in SQLite. It never deletes original files, installs a model or performs inference.
+Ingestion is independent of models and indexing. It reads source photos, records their paths/metadata and saves JPEG previews in the **explicitly selected, existing SQLite album file**. It never creates an album implicitly, deletes originals, installs a model or performs inference.
 
 ## Supported input
 
-Recursive, regular JPEG, PNG, WebP, TIFF and BMP files; extensions are case-insensitive. Animated/multi-page images return a per-file error. RAW and HEIC/HEIF are not supported. Symbolic links and directory junctions inside a photo root are not followed. Empty folders are valid libraries.
+Recursive, regular JPEG, PNG, WebP, TIFF and BMP files; extensions are case-insensitive. Animated/multi-page images return a per-file error. RAW and HEIC/HEIF are not supported. Symbolic links and directory junctions inside a photo root are not followed. Empty source folders are valid.
 
-The root must be absolute. Canonicalization reuses alternate spellings of the same root. Within a library, identity follows normalized relative path: replacing contents retains the photo ID; moving/renaming currently produces a missing old record and a new record.
+The photo root and database path must be absolute. SQLite can be beside, above, below or on a different drive from photos: there is no directory-overlap ban. The selected database, its sidecars and machine-local model cache are excluded from photo enumeration. Generated JPEG exports must stay outside saved scan source directories so previews do not become new originals.
 
-Source and state directories must be separate, non-overlapping trees. Keep the same state directory throughout a workflow. One state directory holds one `photography.db` with multiple libraries and albums.
+One SQLite file is one album. It can receive scans from multiple roots, without a separate library/internal album selector or membership table. See [album-file entry](library.md).
 
 ## Commands
 
-Use actual paths and returned IDs. All commands emit UTF-8 JSON; global `--state-dir` precedes the capability.
+Use actual paths and returned IDs. Commands emit UTF-8 JSON; required global `--database` precedes the capability. Accept `.sqlite`, `.sqlite3` and `.db`; do not infer a default file.
 
 ```text
-python <skill-directory>\scripts\photography.py --state-dir <state-directory> ingestion <absolute-photo-root>
-python <skill-directory>\scripts\photography.py --state-dir <state-directory> ingestion <absolute-photo-root> --album-name <name>
-python <skill-directory>\scripts\photography.py --state-dir <state-directory> management photos --library-id <library-id> --limit 100
-python <skill-directory>\scripts\photography.py --state-dir <state-directory> management photo <photo-id>
+python <skill-directory>\scripts\photography.py --database <absolute-album.sqlite> ingestion <absolute-photo-root>
+python <skill-directory>\scripts\photography.py --database <absolute-album.sqlite> management photos --limit 100
+python <skill-directory>\scripts\photography.py --database <absolute-album.sqlite> management photo <photo-id>
 ```
 
-`ingest` is an alias of `ingestion`; the Python `photography_lib.ingest` import remains compatible. `--thumbnail-size` (64–4096) and `--thumbnail-quality` (1–95) override preview settings. Keep settings consistent across scans; a changed preview profile can require rebuilding previews.
+`--thumbnail-size` (64–4096) and `--thumbnail-quality` (1–95) override preview settings. Keep settings consistent across scans; a changed preview profile can require rebuilding previews. There is no `ingest` alias, `--album-name`, `--album-id`, `--library-id` or old API compatibility layer.
 
-Existing diagnostic CLI commands remain available without constituting another Skill capability:
+Preview export and saved scan diagnostics belong to management:
 
 ```text
-libraries
-scan <scan-id>
-scan-events <scan-id> --changes-only --limit 100
-thumbnail <photo-id> --output <output-directory>\preview.jpg
+management scan <scan-id>
+management scan-events <scan-id> --changes-only --limit 100
+management thumbnail <photo-id> --output <output-directory>\preview.jpg
 ```
 
-Prefix these with the same interpreter/script/state options. `scan-events` follows `next_cursor` with `--after`, retaining filters (limit 1–1000). `changed_photo_ids` is not a whole-library listing; browse with management to find existing photos.
+Prefix these with the same interpreter/script/database options. `scan-events` follows integer `next_cursor` with `--after`, retaining filters (limit 1–1000). `changed_photo_ids` is not a whole-album listing; browse with management to find existing photos.
 
 ## Preview and version contract
 
@@ -42,25 +40,40 @@ The database records original/display dimensions, format, basic camera/exposure/
 
 Index's official SigLIP **224×224 square resize happens only at inference**. It does not replace these stored proportional previews with square ones.
 
-Changed source content or preview profile/hash invalidates old image-index results for current queries. The old rows and other profiles remain intact; no model is run during scanning. A repaired preview with exactly the same input identity can reuse an existing valid result. Old preview bytes may be replaced; preserving vectors is not a promise to replay historical images.
+Only ingestion updates content versions. Changed source content or preview profile/hash invalidates old image-embedding results for current queries. Historical rows and other profiles remain intact; no model is run during scanning. A repaired preview with exactly the same input identity can reuse an existing valid result. Old preview bytes may be replaced; preserving vectors is not a promise to replay historical images.
 
-## Album association
+## Portable paths and stable identity
 
-`--album-name` creates/reuses a name and adds every successfully scanned photo, including unchanged and restored photos. Failed files are excluded from new membership; existing memberships survive failed/missing files.
+Each record has explicit `original_absolute_path` and nullable `original_relative_path` columns. The relative path is slash-separated data relative to the **current database parent**, can include `..`, and is never scan-root- or CWD-relative. Windows cross-drive/UNC-share cases store `NULL` with a visible `RELATIVE_PATH_UNAVAILABLE` warning; the valid absolute path still works.
 
-Without `--album-name`, ingestion does not create an album or change memberships. Libraries are scanning roots, not automatically synchronized albums; later source additions join an album only when ingested with the intended album option. See [albums](albums.md).
+Within the selected file, ingestion matches normalized saved paths, not `library_id` plus a source root:
+
+1. Reuse the photo matching its absolute location.
+2. If its absolute location is missing/unusable on this platform and the database-relative location resolves to the scanned file, retain the photo ID and repair its paths.
+3. Identical content/preview identity reuses previews and embeddings; changed content retains the matched ID but updates the saved version/preview and makes old vectors stale.
+4. With no unambiguous path match, create a new photo record. Identical content hashes alone never merge separate copies.
+
+If several records match a path, or a scanned relative copy conflicts with a still-valid preferred absolute file elsewhere, report `PHOTO_PATH_CONFLICT`. Never choose the copy silently. Permissions/I/O errors are not missing-file evidence and do not permit fallback to another original.
+
+Moving SQLite and photos together with their relative layout intact can preserve IDs on reingestion. Arbitrary renames/moves without surviving path identity cannot be inferred. Use explicit content-verified [relink](management.md) for a known photo's new location. A path-only repair does not change IDs, content versions, previews or vectors; an ordinary absolute lookup does not rewrite the relative path. Ingestion and explicit relink can recalculate paths for their requested scope.
 
 ## Ingestion response
 
-Scan fields include `scan_id`, `library_id`, `status`, `scanned`, `added`, `updated`, `restored`, `unchanged`, `missing`, `failed`, `changed_photo_ids` and `errors`. Album-related fields include `successful_photo_ids`, nullable `album`, `album_added` and `album_unchanged`.
+Scan fields include `scan_id`, `album`, `source_root`, `status`, `scanned`, `added`, `updated`, `restored`, `unchanged`, `missing`, `failed`, `successful_photo_ids`, `changed_photo_ids`, `errors`, `warnings` and `source_errors`. `album` identifies the UUID, filename-derived name and actual database path, not an optional membership association.
 
 ```text
 scanned = added + updated + restored + unchanged + failed
 ```
 
-`index_summary` describes saved image-index state; `index_scope` is `successful_photos_in_this_scan`, and `index_suggested` indicates a possible next step. `model_calls` is zero. Without a configured default, the summary has `status: not_configured`, a null profile and the successful-photo total, not inferred search coverage. Discover/configure a profile through [index](index.md) only as requested. The scan summary is not the whole album's coverage.
+`index_summary` describes saved image-embedding state with `component: image_embedding`; `index_scope` is `successful_photos_in_this_scan`. `model_calls` is zero. Without a configured default, the summary has `status: not_configured`, a null profile and the successful-photo total, not inferred search coverage. The scan summary is not the whole album's coverage or proof of completed technical analysis.
 
-New scan responses no longer contain legacy observation summaries or suggestions. New photo records do not carry a `needs_analysis` scheduling flag; image-index validity is derived from input and profile identity. Old saved scan/photo JSON is not rewritten merely to remove historical fields.
+When `index_suggested` is true, `index_prompt` contains an explicit question asking whether to create/update the semantic-search index, plus `component`, `photo_count`, exact `photo_ids`, `profile_id`, `configuration_required` and `requires_confirmation: true`. It also includes `without_index`, `with_index` and `limitations`: browsing, previews/basic metadata and filename/recorded-path lookup work without indexing; a valid index plus its compatible local model adds Chinese/English visual-content semantic search. Semantic scores rank candidates, not guaranteed detections or exact filters.
+
+The Skill must explain this distinction and ask the question in the user's language after import so users know indexing is a separate, optional preparation step for semantic search. With a selected profile, only successful photos without a ready result are offered; ready photos and failed imports are excluded. Without a default, the prompt offers the successful scan scope but explains that configuration must come first, not that all those photos have a known missing cache.
+
+Empty/all-failed scans and fully indexed repeat scans return `index_prompt: null`. Unchanged photos still missing an index can prompt again. The invitation is saved with the scan result, including a successful subset of an incomplete scan. Do not automatically create a plan, download weights or run inference from this field. If the user already requested import and indexing together, skip the duplicate intent question, prepare the exact offered scope, and follow [index confirmation](index.md). Otherwise wait for agreement before preparing the plan.
+
+An incomplete scan can expose only an error and `scan_id` at the CLI. Fetch `management scan <scan-id>` to inspect its persisted successful subset and invitation before reporting or offering indexing. Never guess its scope. There is no observation-generation prerequisite or legacy scan JSON conversion.
 
 `missing` counts newly missing records separately. Errors include path, an existing photo ID when available, code and message. Complete change/error lists and persisted scan-event pages support later inspection. Exit code 1 indicates partial per-file failure with successful results retained; exit code 2 indicates a call-level failure.
 
@@ -70,14 +83,18 @@ Unchanged size/mtime plus a valid SQLite preview skips source hashing/decoding; 
 
 Changing original bytes while preserving size and mtime can evade this fast path. There is no automatic original-file monitor or full-source-hash verification mode. Preview-only indexing cannot detect source changes ingestion has not discovered.
 
-Single-file failures continue the scan and mark an existing record `error`; retained old metadata is not a current valid input. New unreadable files get error entries and receive a photo ID only after successful ingestion. Index rejects ingestion-error inputs until repaired/rescanned, rather than treating their old previews as current.
+Single-file failures continue the scan and ordinarily mark an existing record `ingest_state: error`; conflict/concurrent-change errors must not overwrite another operation's record. Retained old metadata is not a current valid input. New unreadable files get error entries and receive a photo ID only after successful ingestion. Index rejects ingestion-error inputs until repaired/rescanned, rather than treating their old previews as current.
 
-Missing originals are different: a record marked missing may still have a complete saved preview that index and management can use. This processes the saved version, not proof that the source remains unchanged.
+`original_status` is separate from `ingest_state`: `missing`/`unavailable` originals may still have a complete saved preview that index and management can use. This processes the saved version, not proof that the source remains unchanged. `management original` or relink does not repair an ingestion error.
 
-A complete traversal is required to mark new missing files. Incomplete traversal/interruption records failure without new missing markers. Per-photo savepoints protect photo/preview/membership changes; a handled interruption may retain successful partial work, while an unexpected crash rolls back the scan transaction.
+A complete traversal is required to mark new missing files. It checks both saved locations for relevant absent records in **this source folder** only; photos from other folders are preserved. A valid alternate location prevents a missing marker. Permissions/I/O errors are reported separately. Incomplete traversal/interruption does not infer new missing files.
 
-## Storage maintenance
+Photo/preview updates use short per-photo transactions with identity rechecks, not a transaction across the entire scan or long original reads. Completed per-photo work can survive interruption/crash; a handled incomplete scan saves its summary and diagnostics. Unexpected termination may leave the scan incomplete, so inspect saved state instead of claiming whole-scan rollback or completion.
 
-Current schema is v7. Opening a v1-v6 database makes a consistent backup and transactionally removes unused observation/workflow/text-vector tables, retaining photo/album/preview data and current image-index history. Older thumbnail migration steps still run where needed. Retired table data is preserved in the backup; legacy preview files are not automatically deleted. Migration never loads a model or converts old description vectors.
+## Storage and validation boundary
 
-For missing/invalid legacy previews, report the migration error and repair details; restore using the prior version/backup and retry. Do not skip records or delete originals. Use a consistent SQLite backup, not a casual file copy during writes. State backups include stored previews but not original photo files. A production migration remains a separately authorized operation; see [index design](../../docs/index-design.md).
+Only schema 8/application ID `0x53414C42` albums are supported. Old v1–v7 databases are rejected unchanged; there is no migration, retired-table cleanup or old CLI compatibility. Existing user databases and backups remain untouched.
+
+Use `management backup --output <new-file>` for a consistent SQLite snapshot; it includes saved previews/embeddings, not originals or weights. Stop operations before moving/cloud-syncing the local album, and use one device writer at a time.
+
+The portable code is implemented, with consolidated regression acceptance pending. No new-format real-model trial was performed; prior v7 performance is not new-format acceptance. See [index design](../../docs/index-design.md) and [pending work](../../docs/TODO.md).

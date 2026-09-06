@@ -1,16 +1,18 @@
-from __future__ import annotations
-
+"""Incremental photo ingestion into an explicitly opened single-album file."""
+from datetime import datetime, timezone
 import os
+from pathlib import Path
 import sqlite3
 import stat
-from datetime import datetime, timezone
-from pathlib import Path
 from uuid import uuid4
 
-from .config import Config, PhotographyError, path_key
-from .images import inspect_photo
+from .config import Config, PhotographyError
+from .images import inspect_photo, signature
+from .source_paths import (
+    absolute_candidate, path_identity, persist_resolution, relative_candidate,
+    relative_original_path, resolve_original,
+)
 from .sqlite_storage import SQLiteStorage
-from .storage import Storage
 from .thumbnails import stored_preview
 
 
@@ -18,16 +20,16 @@ def _now():
     return datetime.now(timezone.utc).isoformat()
 
 
-def _root(path: str | Path, config: Config) -> Path:
+def _root(path, config):
     root = Path(path).expanduser()
     if not root.is_absolute():
-        raise PhotographyError("INVALID_PATH", "The photo directory must be an absolute path.")
+        raise PhotographyError("INVALID_PATH", "The photo directory must be absolute.")
     try:
         root = root.resolve(strict=True)
         if not root.is_dir():
             raise PhotographyError("INVALID_PATH", "The photo root must be a directory.")
-        if root.is_relative_to(config.state_dir) or config.state_dir.is_relative_to(root):
-            raise PhotographyError("STATE_OVERLAPS_LIBRARY", "Photo and state directories must be separate, non-overlapping trees.")
+        if root.is_relative_to(config.model_cache_root):
+            raise PhotographyError("INVALID_PATH", "A model cache is not an original photo directory.")
         with os.scandir(root) as entries:
             next(entries, None)
     except FileNotFoundError as exc:
@@ -37,168 +39,237 @@ def _root(path: str | Path, config: Config) -> Path:
     return root
 
 
-def _walk(root: Path, extensions: tuple[str, ...]):
+def _walk(root, extensions, excluded_dirs=(), excluded_files=()):
     pending = [root]
+    forbidden = {path_identity(path) for path in excluded_files}
     while pending:
         folder = pending.pop()
-        # Enumeration failures must propagate; never silently skip an unreadable folder.
         with os.scandir(folder) as entries:
             children = sorted(entries, key=lambda entry: entry.name)
         for entry in children:
             path = Path(entry.path)
             if entry.is_symlink() or (hasattr(path, "is_junction") and path.is_junction()):
                 continue
+            if any(path.is_relative_to(directory) for directory in excluded_dirs):
+                continue
             if entry.is_dir(follow_symlinks=False):
                 pending.append(path)
-            elif entry.is_file(follow_symlinks=False) and path.suffix.lower() in extensions:
+            elif (entry.is_file(follow_symlinks=False) and path.suffix.lower() in extensions
+                  and path_identity(path) not in forbidden):
                 yield path
 
 
-def _process(path: Path, root: Path, library_id: str, old: dict | None, config: Config, storage):
-    current = path.stat(follow_symlinks=False)
-    if not stat.S_ISREG(current.st_mode):
-        raise PhotographyError("FILE_CHANGED_DURING_SCAN", "The photo is no longer a regular file.")
+def _candidates(path, records, database_path):
+    key = path_identity(path)
+    matches = {}
+    for record in records:
+        absolute = absolute_candidate(record["original_absolute_path"])
+        relative = relative_candidate(record["original_relative_path"], database_path)
+        if any(candidate is not None and path_identity(candidate) == key for candidate in (absolute, relative)):
+            matches[record["photo_id"]] = record
+    if len(matches) > 1:
+        raise PhotographyError("PHOTO_PATH_CONFLICT", "More than one saved photo matches this location.",
+                               details={"photo_ids": sorted(matches)})
+    return next(iter(matches.values()), None)
+
+
+def _choose(path, records, database_path):
+    old = _candidates(path, records, database_path)
+    if old is not None:
+        absolute = absolute_candidate(old["original_absolute_path"])
+        if absolute is None or path_identity(absolute) != path_identity(path):
+            resolved = resolve_original(old, database_path)
+            if resolved["status"] == "unavailable":
+                raise PhotographyError(resolved["error"]["code"], resolved["error"]["message"])
+            if resolved["status"] != "available":
+                raise PhotographyError("FILE_CHANGED_DURING_SCAN", "Original disappeared during path matching.")
+            if path_identity(resolved["path"]) != path_identity(path):
+                raise PhotographyError("PHOTO_PATH_CONFLICT",
+                                       "The preferred absolute location exists elsewhere; this relative copy cannot silently replace it.")
+    return old
+
+
+def _identity(photo):
+    if photo is None:
+        return None
+    keys = ("original_absolute_path", "original_relative_path", "content_version",
+            "thumbnail_profile", "size_bytes", "mtime_ns", "ingest_state")
+    return tuple(photo[key] for key in keys)
+
+
+def _prepare(path, old, config, store):
+    info = path.stat(follow_symlinks=False)
+    if not stat.S_ISREG(info.st_mode):
+        raise PhotographyError("FILE_CHANGED_DURING_SCAN", "The source is not a regular file.")
     reusable = False
     if old and old["thumbnail_profile"] == config.thumbnail_profile:
         try:
-            stored_preview(old, storage)
+            stored_preview(old, store)
             reusable = True
         except PhotographyError:
-            pass
-    if (old and old["state"] == "available" and old["size_bytes"] == current.st_size
-            and old["mtime_ns"] == current.st_mtime_ns
-            and old["thumbnail_profile"] == config.thumbnail_profile
-            and reusable):
-        return old, "unchanged", False, None
-
-    photo_id = old["photo_id"] if old else f"photo_{uuid4().hex}"
-    details, thumbnail = inspect_photo(path, old, config, preview_reusable=reusable)
-    content_changed = old is None or old["content_hash"] != details["content_hash"]
-    photo = dict(old or {})
-    photo.update(details)
-    photo.update(photo_id=photo_id, library_id=library_id,
-                 original_path=str(path), relative_path=path.relative_to(root).as_posix(),
-                 path_key=path_key(path.relative_to(root)), state="available",
-                 content_version=details["content_hash"], thumbnail_id=photo_id,
-                 thumbnail_profile=config.thumbnail_profile, last_error=None, missing_since=None,
-                 created_at=old["created_at"] if old else _now(), updated_at=_now())
-    photo.pop("thumbnail_path", None)
-    if old is None:
-        outcome = "added"
-    elif old["state"] == "missing" or old.get("missing_since"):
-        outcome = "restored"
-    elif content_changed or thumbnail is not None or old["state"] == "error":
-        outcome = "updated"
+            reusable = False
+    absolute = absolute_candidate(old["original_absolute_path"]) if old else None
+    same_location = absolute is not None and path_identity(absolute) == path_identity(path)
+    if (old and same_location and old["ingest_state"] == "available" and reusable
+            and (old["size_bytes"], old["mtime_ns"]) == (info.st_size, info.st_mtime_ns)):
+        details, thumbnail = {key: old[key] for key in ("content_version", "size_bytes", "mtime_ns", "metadata")}, None
     else:
-        outcome = "unchanged"
-    input_changed = content_changed or not reusable or thumbnail is not None
-    return photo, outcome, outcome != "unchanged" and input_changed, thumbnail
+        details, thumbnail = inspect_photo(path, old, config, preview_reusable=reusable)
+    relative, warning = relative_original_path(path, config.database_path)
+    changed = old is None or old["content_version"] != details["content_version"] or thumbnail is not None
+    stamp = _now()
+    paths_changed = old is None or (old["original_absolute_path"], old["original_relative_path"]) != (str(path), relative)
+    data_changed = old is None or changed or old["ingest_state"] == "error" or (
+        old["size_bytes"], old["mtime_ns"]) != (details["size_bytes"], details["mtime_ns"])
+    photo = {**(old or {}), **details,
+             "photo_id": old["photo_id"] if old else "photo_" + uuid4().hex,
+             "original_absolute_path": str(path), "original_relative_path": relative,
+             "thumbnail_profile": config.thumbnail_profile, "ingest_state": "available",
+             "original_status": "available", "last_ingest_error": None, "last_path_error": None,
+             "last_original_check": stamp, "created_at": old["created_at"] if old else stamp,
+             "updated_at": stamp if data_changed else old["updated_at"],
+             "path_updated_at": stamp if paths_changed else old["path_updated_at"]}
+    outcome = ("added" if old is None else "restored" if old["original_status"] == "missing" else
+               "updated" if changed or old["ingest_state"] == "error" else "unchanged")
+    return photo, outcome, changed, thumbnail, warning, info
 
 
-def _scan(root: Path, config: Config, storage: Storage, album_name=None) -> dict:
-    scan_id = f"scan_{uuid4().hex}"
+def _summary(result, store):
+    profile_id = store.default_embedding_profile()
+    if profile_id is None:
+        result["index_summary"] = {"profile_id": None, "component": "image_embedding",
+            "status": "not_configured", "counts": {"total": len(result["successful_photo_ids"])},
+            "reason": "Select an image embedding profile before planning.", "model_calls": 0}
+        ids = list(result["successful_photo_ids"])
+    else:
+        from .image_embedding import embedding_status
+        status = embedding_status([store.photo(pid) for pid in result["successful_photo_ids"]],
+                                  store, store.embedding_profile(profile_id))
+        result["index_summary"] = {key: value for key, value in status.items() if key != "items"}
+        ids = [item["photo_id"] for item in status["items"] if item["status"] != "ready"]
+    result["index_suggested"] = bool(ids)
+    result["index_prompt"] = ({
+        "action": "create_index", "component": "image_embedding",
+        "question": f"Would you like to create or update the semantic-search index for these {len(ids)} photos?",
+        "without_index": ["Browse photos, saved previews and basic metadata.",
+                          "Find photos by filename or recorded path."],
+        "with_index": ["All of the above, plus Chinese/English semantic search for visual content such as people, scenes and colors."],
+        "limitations": "Semantic search requires a compatible local model and ranks similar candidates, not guaranteed detections or exact filters.",
+        "photo_count": len(ids), "photo_ids": ids, "profile_id": profile_id,
+        "configuration_required": profile_id is None, "requires_confirmation": True,
+    } if ids else None)
+    result.update(index_scope="successful_photos_in_this_scan", model_calls=0)
+
+
+def _within(path, root):
+    return path is not None and Path(path_identity(path)).is_relative_to(Path(path_identity(root)))
+
+
+def _scan(root, config, store):
+    store.assert_writable()
+    scan_id = "scan_" + uuid4().hex
+    root_relative, root_warning = relative_original_path(root, config.database_path)
+    with store.read_snapshot():
+        initial = store.photos()
+    result = {"scan_id": scan_id, "album": store.album(), "source_root": str(root), "status": "completed",
+              "scanned": 0, "added": 0, "updated": 0, "restored": 0, "unchanged": 0,
+              "missing": 0, "failed": 0, "successful_photo_ids": [], "changed_photo_ids": [],
+              "errors": [], "warnings": [root_warning] if root_warning else [], "source_errors": []}
+    with store.transaction():
+        store.start_scan(scan_id, str(root), root_relative)
+    seen = set()
     fatal = None
-    with storage.transaction():
-        library = storage.library(str(root), path_key(root))
-        album = storage.create_album(album_name) if album_name is not None else None
-        storage.start_scan(scan_id, library["library_id"])
-        previous = {photo["path_key"]: photo for photo in storage.photos_for_library(library["library_id"])}
-        seen = set()
-        result = dict(scan_id=scan_id, library_id=library["library_id"], status="completed",
-                      scanned=0, added=0, updated=0, restored=0, unchanged=0, missing=0,
-                      failed=0, changed_photo_ids=[], errors=[], successful_photo_ids=[],
-                      album=album, album_added=0, album_unchanged=0)
-        try:
-            root_info = root.stat()
-            for path in _walk(root, config.extensions):
-                key = path_key(path.relative_to(root))
-                old = previous.get(key)
-                seen.add(key)
-                result["scanned"] += 1
-                try:
-                    with storage.savepoint():
-                        photo, outcome, downstream, thumbnail = _process(path, root, library["library_id"], old, config, storage)
-                        if outcome != "unchanged" or photo is not old:
-                            storage.put_photo(photo)
-                        if thumbnail is not None:
-                            storage.put_thumbnail(photo, thumbnail)
-                        membership = storage.change_members(album["album_id"], [photo["photo_id"]]) if album else None
-                except (PhotographyError, OSError, KeyboardInterrupt) as exc:
-                    error = {"path": str(path), "photo_id": old["photo_id"] if old else None,
-                             "code": (exc.code if isinstance(exc, PhotographyError) else
-                                      "SCAN_INTERRUPTED" if isinstance(exc, KeyboardInterrupt) else "FILE_READ_FAILED"),
-                             "message": str(exc) or "Photo processing was interrupted."}
-                    result["failed"] += 1
-                    result["errors"].append(error)
-                    if old:
-                        stale = dict(old, state="error", last_error=error, updated_at=_now())
-                        storage.put_photo(stale)
-                    storage.event(scan_id, "failed", error["photo_id"], str(path), error)
-                    if isinstance(exc, KeyboardInterrupt):
-                        raise
-                    continue
-                if membership:
-                    result["album_added"] += membership["added"]
-                    result["album_unchanged"] += membership["unchanged"]
-                result["successful_photo_ids"].append(photo["photo_id"])
+    protected = [config.database_path]
+    protected.extend(config.database_path.with_name(config.database_path.name + suffix)
+                     for suffix in ("-journal", "-wal", "-shm", ".image-embedding.lock"))
+    try:
+        root_info = root.stat()
+        for path in _walk(root, config.extensions, (config.model_cache_root,), protected):
+            old = None
+            result["scanned"] += 1
+            try:
+                with store.read_snapshot():
+                    records = store.photos()
+                old = _choose(path, records, config.database_path)
+                if old:
+                    seen.add(old["photo_id"])
+                photo, outcome, changed, thumbnail, warning, observed = _prepare(path, old, config, store)
+                with store.transaction():
+                    current = _candidates(path, store.photos(), config.database_path)
+                    if (current is None) != (old is None) or (current and (
+                            current["photo_id"] != old["photo_id"] or _identity(current) != _identity(old))):
+                        raise PhotographyError("PHOTO_PATH_CHANGED", "Another operation changed this path or photo while reading it; retry.")
+                    if signature(path.stat(follow_symlinks=False)) != signature(observed):
+                        raise PhotographyError("FILE_CHANGED_DURING_SCAN", "The source changed before its data could be saved.")
+                    store.put_photo(photo)
+                    if thumbnail is not None:
+                        store.put_thumbnail(photo, thumbnail)
+                    store.event(scan_id, outcome, photo["photo_id"], str(path))
+                seen.add(photo["photo_id"])
                 result[outcome] += 1
-                if downstream:
+                result["successful_photo_ids"].append(photo["photo_id"])
+                if changed:
                     result["changed_photo_ids"].append(photo["photo_id"])
-                storage.event(scan_id, outcome, photo["photo_id"], str(path))
-            final_root = root.stat()
-            if (root_info.st_dev, root_info.st_ino) != (final_root.st_dev, final_root.st_ino):
-                raise OSError("The photo root changed during enumeration.")
-        except OSError as exc:
-            fatal = PhotographyError("SCAN_INCOMPLETE", f"Directory scan did not complete: {exc}", scan_id)
-        except KeyboardInterrupt:
-            fatal = PhotographyError("SCAN_INTERRUPTED", "Scan interrupted; no new missing markers were applied.", scan_id)
-        # Only a complete directory traversal can establish that a path is missing.
-        if fatal is None:
-            for key, photo in previous.items():
-                if (key not in seen and photo["state"] != "missing"
-                        and Path(photo["relative_path"]).suffix.lower() in config.extensions):
-                    storage.put_photo(dict(photo, state="missing", missing_since=_now(), updated_at=_now()))
+                if warning:
+                    result["warnings"].append({**warning, "photo_id": photo["photo_id"]})
+            except (PhotographyError, OSError) as exc:
+                error = {"path": str(path), "photo_id": old["photo_id"] if old else None,
+                         "code": exc.code if isinstance(exc, PhotographyError) else "FILE_READ_FAILED", "message": str(exc)}
+                result["failed"] += 1
+                result["errors"].append(error)
+                with store.transaction():
+                    if old and error["code"] not in ("PHOTO_PATH_CHANGED", "PHOTO_PATH_CONFLICT"):
+                        current = store.photo(old["photo_id"])
+                        if _identity(current) == _identity(old):
+                            store.put_photo({**current, "ingest_state": "error", "last_ingest_error": error, "updated_at": _now()})
+                        else:
+                            error["state_update"] = "not_applied_due_to_concurrent_change"
+                    store.event(scan_id, "failed", error["photo_id"], str(path), error)
+        final = root.stat()
+        if (root_info.st_dev, root_info.st_ino) != (final.st_dev, final.st_ino):
+            raise OSError("The source directory changed during enumeration.")
+    except OSError as exc:
+        fatal = PhotographyError("SCAN_INCOMPLETE", str(exc), scan_id)
+    except KeyboardInterrupt:
+        fatal = PhotographyError("SCAN_INTERRUPTED", "Scan interrupted; no new missing markers were applied.", scan_id)
+    if fatal is None:
+        for old in initial:
+            if old["photo_id"] in seen:
+                continue
+            candidates = (absolute_candidate(old["original_absolute_path"]),
+                          relative_candidate(old["original_relative_path"], config.database_path))
+            if not any(_within(candidate, root) for candidate in candidates):
+                continue
+            resolution = resolve_original(old, config.database_path)
+            try:
+                persist_resolution(store, old, resolution)
+                if resolution["status"] == "missing" and old["original_status"] != "missing":
                     result["missing"] += 1
-                    storage.event(scan_id, "missing", photo["photo_id"], photo["original_path"])
-            result["status"] = "partial" if result["failed"] else "completed"
-        else:
-            result.update(status="failed", error=fatal.to_dict())
-        profile_id = storage.default_index_profile()
-        if profile_id is None:
-            result["index_summary"] = {
-                "profile_id": None, "status": "not_configured",
-                "counts": {"total": len(result["successful_photo_ids"])},
-                "reason": "Select an installed image index profile before indexing.",
-                "model_calls": 0,
-            }
-            result["index_suggested"] = bool(result["successful_photo_ids"])
-        else:
-            from .indexing import index_status
-            indexed = index_status([storage.photo(p) for p in result["successful_photo_ids"]],
-                                   storage, storage.index_profile(profile_id))
-            result["index_summary"] = {k: v for k, v in indexed.items() if k != "items"}
-            result["index_suggested"] = indexed["counts"]["ready"] < indexed["counts"]["total"]
-        result["index_scope"] = "successful_photos_in_this_scan"
-        result["model_calls"] = 0
-        storage.finish_scan(scan_id, result)
+                    with store.transaction():
+                        store.event(scan_id, "missing", old["photo_id"], old["original_absolute_path"])
+                if resolution["status"] == "unavailable":
+                    result["source_errors"].append({"photo_id": old["photo_id"], **resolution["error"]})
+            except PhotographyError as exc:
+                result["source_errors"].append({"photo_id": old["photo_id"], **exc.to_dict()})
+        result["status"] = "partial" if result["failed"] or result["source_errors"] else "completed"
+    else:
+        result.update(status="failed", error=fatal.to_dict())
+    with store.transaction():
+        _summary(result, store)
+        store.finish_scan(scan_id, result)
     if fatal:
         raise fatal
     return result
 
 
-def ingest(path: str | Path, *, config: Config | None = None, storage: Storage | None = None, album_name=None) -> dict:
-    """Incrementally index a photo root without modifying its files.
-
-    Config and storage injection are for local setup/testing. Normal callers use ingest(path).
-    """
-    config = config or Config.from_env()
+def ingestion(path, *, config: Config, storage=None):
     root = _root(path, config)
-    if album_name is not None:
-        SQLiteStorage.album_name(album_name)
     try:
         if storage is not None:
-            return _scan(root, config, storage, album_name)
-        with SQLiteStorage(config.state_dir) as local:
-            return _scan(root, config, local, album_name)
+            if storage.database_path != config.database_path:
+                raise PhotographyError("ALBUM_MISMATCH", "Storage is not the selected album file.")
+            return _scan(root, config, storage)
+        with SQLiteStorage.open(config.database_path, writable=True) as store:
+            return _scan(root, config, store)
     except sqlite3.Error as exc:
         raise PhotographyError("STORAGE_UNAVAILABLE", str(exc)) from exc

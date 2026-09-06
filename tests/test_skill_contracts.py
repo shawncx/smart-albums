@@ -53,6 +53,32 @@ class SkillContractTests(unittest.TestCase):
         for name in ("embedding_model.py", "embedding_text.py", "embeddings.py"):
             self.assertFalse((ROOT / "photography" / "scripts" / "photography_lib" / name).exists())
 
+    def test_ingestion_requires_explicit_index_invitation(self):
+        text = (ROOT / "photography" / "SKILL.md").read_text(encoding="utf-8")
+        section = text.split("## ingestion", 1)[1].split("## index", 1)[0]
+        self.assertIn("index_prompt", section)
+        self.assertIn("explicitly ask the user whether to create an index", section)
+        self.assertIn("index_prompt.photo_ids", section)
+        self.assertIn("configuration_required", section)
+        self.assertIn("**Without an index:**", section)
+        self.assertIn("**With a valid index and its compatible local model:**", section)
+        self.assertIn("not guaranteed detections or exact filters", section)
+        self.assertIn("do not ask the same intent question again", section)
+        self.assertIn("wait for the user's answer", section)
+
+    def test_skill_requires_explicit_album_lifecycle_without_legacy_fallback(self):
+        text = (ROOT / "photography" / "SKILL.md").read_text(encoding="utf-8")
+        heading = "## Select or create the SQLite album file first"
+        self.assertLess(text.index(heading), text.index("## ingestion"))
+        section = text.split(heading, 1)[1].split("## Runtime and safety", 1)[0]
+        for expected in ("SQLite album file", "one album per SQLite file", "open an existing album", "create a new album",
+                         "missing file is an error", "creation requires an explicit choice",
+                         "clear the previous photo/profile/run selections", "no second selection of an internal album",
+                         "--database", "management create", "management open"):
+            self.assertIn(expected, section)
+        self.assertIn("references/library.md", section)
+        self.assertNotIn("planned but not implemented", section)
+        self.assertNotIn("otherwise `PHOTOGRAPHY_STATE_DIR`", text)
 
 if __name__ == "__main__":
     unittest.main()

@@ -1,27 +1,36 @@
-# Search: management workflow and legacy boundary
+# Search within the selected album
 
 Search is part of **management**, not a separate public Skill capability. It has two explicit modes:
 
 ```text
-management search "<album-name-fragment>" --mode metadata --target albums
-management search "<filename-fragment>" --mode metadata --target photos
+management search "<filename-or-recorded-path-fragment>" --mode metadata
 management search "<Chinese or English visual query>" --mode semantic --profile-id <profile-id>
 ```
 
-Prefix commands with `python <skill-directory>\scripts\photography.py --state-dir <state-directory>`. See [management](management.md) for exact scopes, pagination, result fields and read-only HTML/JSON exports.
+Prefix commands with `python <skill-directory>\scripts\photography.py --database <absolute-album.sqlite>`. Optional global `--model-cache-dir <cache-root>` also goes before `management`, consistently with index setup/execution. See [management](management.md) for pagination, result fields and read-only HTML/JSON exports.
 
-Metadata mode uses Unicode NFC/casefold literal matching on album names or photo filenames/relative paths. It needs neither a model nor a default profile.
+## Metadata: no model needed
+
+Metadata mode uses Unicode NFC/casefold literal substrings in photo filenames and recorded absolute/relative paths. It needs neither a model nor a default profile. `%` and `_` are literal, not SQL wildcards. It does not search album names, descriptions, other SQLite files or an internal album/library target.
+
+Results are in stable photo-ID order. Default limit is 100, accepted range 1–1000; follow `next_cursor` with `--after`, retaining the query/profile. A blank query is an error; no matches remain an empty result, not an automatic switch to semantic mode.
+
+## Semantic: matched image/text space
 
 Semantic mode searches **image embeddings**, not saved descriptions. Use [index](index.md) for the optional `requirements-index.txt` runtime, authorized `index setup`, explicit profile selection, confirmed indexing and recovery. First setup does not choose a default; configure explicitly or pass a profile ID. Image/text encoders must match the same profile.
 
-Ordinary search is offline, encodes only the query, reports incomplete coverage and never creates missing photo vectors, changes an album/default, downloads weights or calls cloud analysis. Scores are relative cosine similarities, not probabilities or guaranteed matches. Real-model quality has not been established by synthetic tests.
+The stored image vectors represent whole SQLite previews in a paired semantic space (`image_text_semantic`, `stored_modality: image`, `input_scope: stored_thumbnail`, `granularity: whole_image`). The initial SigLIP 2 Base 224 profile produces 768 dimensions. Query vectors are transient, not saved image results or a separate persistent query index.
 
-## Compatibility-only saved selections
+Search is offline and read-only. It encodes only the query, reports coverage across the entire selected album, and never generates missing photo vectors, changes a default, downloads weights, accesses originals or repairs paths. An empty eligible candidate set returns without model loading. Saved `original_status` is not a new filesystem check.
 
-The old description-embedding runtime, text recipe and installation/generation/search entry points have been retired. Do not reinstall that runtime or use its old workflow to prepare the new image index. Legacy description-vector rows remain in SQLite for preservation, not as fallback candidates for a different model space.
+Use the user's Chinese or English query directly, without automatic translation or old description-retrieval prefixes. The current text limit is 64 tokens including EOS; overlong text is rejected, not silently truncated.
 
-The existing legacy search-report renderer and `search-add` remain available only for already supported **legacy search snapshots** and explicitly requested compatibility use. They do not accept the new `management-snapshot-v1` format.
+Semantic search returns ranked top-K, default 10 and range 1–1000, with photo-ID tie-breaking. It rejects `--after`. Scores are cosine similarities, not probabilities, guaranteed matches, exact count/negation filters or focus/blur measurements. Report missing/stale/invalid coverage rather than implying all photos were searched.
 
-In that old protocol, selection adds only explicit photo IDs present in the saved snapshot, without rerunning the query or copying vectors/observations. Old report checkboxes belong only to that compatibility protocol. They are not new management widgets, and a new management search must not automatically direct the user to save a selection into an album.
+## Read-only snapshots and validation boundary
 
-New HTML reports are read-only snapshots with no selection controls, album writes or live search server. If an operation is outside the three current capabilities, explain that boundary instead of silently substituting a legacy workflow.
+JSON/HTML uses `album-snapshot-v1`, identifies the album UUID/path and preserves saved input identities. HTML validates embedded previews without loading originals; it shows errors for changed/unavailable previews rather than substituting another version.
+
+There are no selection controls, album membership writes, live search server or retained `search-add` protocol. Old databases/reports are not migrated or converted into this format; do not restore the removed description-analysis runtime.
+
+No new-format real-model trial was performed in this implementation. Consolidated regression acceptance is pending, and earlier v7 performance does not establish new-format retrieval quality, latency, memory or offline-runtime acceptance.

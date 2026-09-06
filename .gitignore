@@ -15,6 +15,14 @@ artifacts/
 !.env.example
 *.sqlite
 *.sqlite3
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+*.sqlite3-journal
+*.sqlite3-wal
+*.sqlite3-shm
+*.image-embedding.lock
+.sa-*.tmp
 *.pem
 *.key
 # Local development plans and verification reports reference private runtime data.
@@ -22,3 +30,4 @@ artifacts/
 !/docs/TODO.md
 !/docs/ingestion-index-management-plan.md
 !/docs/index-design.md
+!/docs/portable-album-plan.md

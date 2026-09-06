@@ -32,8 +32,8 @@ def search_report(result, output, *, config, store):
 </style>'''
     page += '<header><h1>Photography · 语义搜索</h1><p class="summary">' + html.escape(result["query"]) + '</p>'
     page += f'<p>本次范围 {coverage["total"]} 张 · 可搜索 {coverage["ready"]} 张 · 缺少有效分析 {coverage["needs_analysis"]} 张 · 待建向量 {coverage["missing"]} 张 · 过期 {coverage["stale"]} 张 · 无效 {coverage["invalid"]} 张</p>'
-    page += '<p class="muted">本地计算 · 数据库已保存版本 · 相似度不是符合条件的概率。结果是快照；搜索没有改动相册。</p></header><main>'
-    page += ''.join(cards) or '<p>当前范围没有可搜索的向量。已有描述可先建立向量；没有描述的照片需另行分析。</p>'
+    page += '<p class="muted">已保存搜索快照 · 分数和覆盖率来自快照生成时，不代表当前索引状态。相似度不是符合条件的概率；查看快照不会改动相册。</p></header><main>'
+    page += ''.join(cards) or '<p>此快照没有搜索结果。新的本地索引与语义查询尚未实现。</p>'
     page += '''</main><footer><h2>选择结果加入相册</h2><p>勾选照片后复制下方标识，并告诉 Skill 要加入的相册。也可下载选择文件。页面不会直接修改数据库。</p><textarea id="selection" readonly aria-label="已选照片标识">[]</textarea><button id="download">下载选择文件</button><p class="muted">使用与本页面同时生成的搜索 JSON，保存相册时按这些照片标识操作，不重新搜索。</p></footer><script>
 function selected(){return Array.from(document.querySelectorAll('input:checked')).map(i=>i.value)}
 document.querySelectorAll('input').forEach(i=>i.addEventListener('change',()=>document.getElementById('selection').value=JSON.stringify(selected(),null,2)));

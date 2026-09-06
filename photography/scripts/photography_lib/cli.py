@@ -19,7 +19,7 @@ from .exports import export_path
 
 
 def parser():
-    root = argparse.ArgumentParser(description="Smart Albums: photo ingestion, album management, visual analysis and local semantic search.")
+    root = argparse.ArgumentParser(description="Smart Albums: photo ingestion, album management, visual analysis and saved result selection. Local indexing and new semantic queries are not yet available.")
     root.add_argument("--state-dir", help="State directory; defaults to PHOTOGRAPHY_STATE_DIR or ~/.photography-skill.")
     commands = root.add_subparsers(dest="command", required=True)
     scan = commands.add_parser("ingest", help="Incrementally scan a photo directory.")
@@ -104,29 +104,6 @@ def parser():
     report.add_argument("--provider", choices=("openai", "codex"), help="Optional cache profile filter; otherwise show saved results across models.")
     report.add_argument("--reasoning", choices=("low", "medium", "high", "xhigh"), default="low")
     report.add_argument("--language", choices=("zh-CN", "en"), default="zh-CN")
-    commands.add_parser("embedding-setup", help="Explicitly download the pinned local text model, with checksums; no photos sent.")
-    for name in ("embed", "embedding-status", "search"):
-        cmd = commands.add_parser(name, help="Local saved-description vectors and semantic search; never calls a vision model.")
-        scope = cmd.add_mutually_exclusive_group()
-        scope.add_argument("--album-id")
-        scope.add_argument("--library-id")
-        cmd.add_argument("--model-dir", help="Load this directory's pinned local model; no automatic download.")
-        cmd.add_argument("--encoder-id", help="Require this encoding profile. The installed adapter must match.")
-        if name == "embed":
-            cmd.add_argument("photo_ids", nargs="*")
-            scope.add_argument("--ids-file")
-            cmd.add_argument("--limit", type=int, help="Limit selected photos; otherwise process the explicit scope.")
-            cmd.add_argument("--force", action="store_true")
-            cmd.add_argument("--dry-run", action="store_true")
-        elif name == "embedding-status":
-            cmd.add_argument("--limit", type=int, default=100)
-            cmd.add_argument("--after", default="")
-            cmd.add_argument("--status", choices=("ready", "missing", "stale", "needs_analysis", "invalid"))
-        else:
-            cmd.add_argument("query")
-            cmd.add_argument("--limit", type=int, default=10)
-            cmd.add_argument("--output", help="Save this exact ranked result as JSON.")
-            cmd.add_argument("--html", help="Save a browsable snapshot plus companion search JSON.")
     selection = commands.add_parser("search-add", help="Add selected IDs from a saved search JSON to an album; no new search.")
     selection.add_argument("result_file")
     selection.add_argument("--album-name", required=True)
@@ -190,13 +167,10 @@ def main(argv=None):
                                  thumbnail_quality=getattr(args, "thumbnail_quality", 85))
         if args.command == "ingest":
             result = ingest(args.path, config=config, album_name=args.album_name)
-        elif args.command == "embedding-setup":
-            from .embedding_model import prepare_model, default_model_dir
-            result = prepare_model(default_model_dir(config.state_dir))
         else:
             with SQLiteStorage(config.state_dir) as store:
-                if args.command in ("embed", "embedding-status", "search", "search-add"):
-                    result = local_search_command(args, config, store)
+                if args.command == "search-add":
+                    result = search_selection_command(args, store)
                 elif args.command in ("analyze", "analysis-plan", "analysis-config", "analysis-confirm", "analysis-execute", "analysis-resume", "analysis-job", "analysis-collect", "analysis-cancel", "analysis-cleanup", "analysis-recover"):
                     from .workflow_cli import command
                     result = command(args, store, config)
@@ -270,63 +244,11 @@ def read_json_file(path):
         raise PhotographyError("INVALID_ARGUMENT", "Expected a readable UTF-8 JSON file.") from None
 
 
-def local_search_command(args, config, store):
-    from .analysis_schema import fingerprint
-    from .embedding_model import LocalEncoder, default_model_dir, default_profile
-    from .embeddings import embed, embedding_status
-    from .search import search, add_search_selection
-    from .search_report import search_report
-    if args.command == "search-add":
-        if args.photo_ids and args.ids_file:
-            raise PhotographyError("INVALID_ARGUMENT", "Use explicit photo IDs or --ids-file.")
-        ids = read_json_file(args.ids_file) if args.ids_file else args.photo_ids
-        if not isinstance(ids, list) or any(not isinstance(i, str) for i in ids):
-            raise PhotographyError("INVALID_ARGUMENT", "Selection must be an array of photo IDs.")
-        return add_search_selection(read_json_file(args.result_file), ids, store=store, album_name=args.album_name)
-    encoder = LocalEncoder(args.model_dir or default_model_dir(config.state_dir))
-    profile = default_profile()
-    if args.encoder_id and args.encoder_id != fingerprint(profile):
-        if args.command == "embedding-status" and store.encoder(args.encoder_id):
-            profile = store.encoder(args.encoder_id)
-        else:
-            raise PhotographyError("ENCODER_UNSUPPORTED", "This adapter cannot encode queries in the requested vector space.")
-    if args.command == "search":
-        # Validate export paths before spending time encoding the query.
-        json_output = export_path(args.output, config, store, (".json",)) if args.output else None
-        html_output = export_path(args.html, config, store, (".html",)) if args.html else None
-        if html_output and not json_output:
-            json_output = export_path(html_output.with_suffix(".json"), config, store, (".json",))
-        result = search(args.query, store=store, encoder=encoder, album_id=args.album_id, library_id=args.library_id, limit=args.limit)
-        if html_output:
-            result["html_output"] = search_report(result, html_output, config=config, store=store)
-        if json_output:
-            result["output"] = str(json_output)
-            json_output.parent.mkdir(parents=True, exist_ok=True)
-            json_output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-        return result
-    if args.command == "embedding-status":
-        store._limit(args.limit)
-        photos = store.search_photos(album_id=args.album_id, library_id=args.library_id)
-        records = store.embedding_candidates(fingerprint(profile), album_id=args.album_id, library_id=args.library_id)
-        result = embedding_status(photos, store, profile, records=records)
-        matches = sorted((e for e in result["items"] if e["photo_id"] > args.after and (not args.status or e["status"] == args.status)), key=lambda e: e["photo_id"])
-        result["items"] = matches[:args.limit]
-        result["next_cursor"] = matches[args.limit - 1]["photo_id"] if len(matches) > args.limit else None
-        return result
-    if args.photo_ids and (args.album_id or args.library_id or args.ids_file):
-        raise PhotographyError("INVALID_ARGUMENT", "Select explicit photo IDs or one album/library/IDs file.")
-    if args.album_id or args.library_id:
-        photos = sorted(store.search_photos(album_id=args.album_id, library_id=args.library_id), key=lambda p: (p["relative_path"].casefold(), p["photo_id"]))
-        ids = [p["photo_id"] for p in photos]
-    else:
-        ids = read_json_file(args.ids_file) if args.ids_file else args.photo_ids
-        if not ids:
-            raise PhotographyError("INVALID_ARGUMENT", "Provide photo IDs or an explicit album/library scope.")
+def search_selection_command(args, store):
+    from .search import add_search_selection
+    if args.photo_ids and args.ids_file:
+        raise PhotographyError("INVALID_ARGUMENT", "Use explicit photo IDs or --ids-file.")
+    ids = read_json_file(args.ids_file) if args.ids_file else args.photo_ids
     if not isinstance(ids, list) or any(not isinstance(i, str) or not i for i in ids):
-        raise PhotographyError("INVALID_ARGUMENT", "Photo IDs must be a JSON array of non-empty strings.")
-    ids = list(dict.fromkeys(ids))
-    if args.limit is not None:
-        if args.limit < 1:
-            raise PhotographyError("INVALID_ARGUMENT", "Embedding limit must be positive.")
-        ids = ids[:args.limit]
-    return embed(ids, store=store, encoder=encoder, force=args.force, dry_run=args.dry_run)
+        raise PhotographyError("INVALID_ARGUMENT", "Selection must be an array of non-empty photo IDs.")
+    return add_search_selection(read_json_file(args.result_file), ids, store=store, album_name=args.album_name)

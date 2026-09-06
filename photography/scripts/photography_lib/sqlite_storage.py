@@ -59,6 +59,7 @@ SCHEMA = (
         content_version TEXT NOT NULL, profile TEXT NOT NULL, image_hash TEXT NOT NULL,
         mime_type TEXT NOT NULL, width INTEGER NOT NULL, height INTEGER NOT NULL,
         created_at TEXT NOT NULL, size_bytes INTEGER NOT NULL, data BLOB NOT NULL)""",
+    # Preserve the v4/v5 archive schema; retired text-index rows are never rewritten.
     """CREATE TABLE IF NOT EXISTS embedding_encoders (
         encoder_id TEXT PRIMARY KEY, profile_json TEXT NOT NULL, created_at TEXT NOT NULL)""",
     """CREATE TABLE IF NOT EXISTS photo_embeddings (
@@ -244,51 +245,6 @@ class SQLiteStorage(WorkflowStorage):
     def analysis_records(self, photo_id):
         return [json.loads(row[0]) for row in self.db.execute(
             "SELECT data_json FROM analyses WHERE photo_id=? ORDER BY created_at DESC,rowid DESC", (photo_id,))]
-
-    def search_photos(self, *, album_id=None, library_id=None):
-        if album_id and library_id:
-            raise PhotographyError("INVALID_ARGUMENT", "Select one album or library.")
-        if album_id:
-            return self.photos_for_album(album_id)
-        if library_id:
-            self.photos(library_id, 1)
-            return self.photos_for_library(library_id)
-        return [json.loads(row[0]) for row in self.db.execute("SELECT data_json FROM photos ORDER BY photo_id")]
-
-    def embedding_candidates(self, encoder_id, *, album_id=None, library_id=None):
-        # SQL restricts scope and encoding space. Domain code checks current analysis/text versions.
-        clause, args = "", [encoder_id]
-        if album_id:
-            clause = " AND EXISTS (SELECT 1 FROM album_photos ap WHERE ap.photo_id=e.photo_id AND ap.album_id=?)"
-            args.append(album_id)
-        elif library_id:
-            clause = " AND p.library_id=?"
-            args.append(library_id)
-        return {row["photo_id"]: dict(row) for row in self.db.execute(
-            "SELECT e.* FROM photo_embeddings e JOIN photos p ON p.photo_id=e.photo_id WHERE e.encoder_id=?" + clause, args)}
-
-    def embedding(self, photo_id, encoder_id):
-        row = self.db.execute("SELECT * FROM photo_embeddings WHERE photo_id=? AND encoder_id=?", (photo_id, encoder_id)).fetchone()
-        return dict(row) if row else None
-
-    def encoder(self, encoder_id):
-        row = self.db.execute("SELECT profile_json FROM embedding_encoders WHERE encoder_id=?", (encoder_id,)).fetchone()
-        return json.loads(row[0]) if row else None
-
-    def put_embedding(self, record, profile):
-        from .analysis_schema import fingerprint
-        from .embedding_model import unpack_vector
-        if fingerprint(profile) != record["encoder_id"] or profile["dimensions"] != record["dimensions"]:
-            raise PhotographyError("INVALID_VECTOR", "Encoding profile mismatch.")
-        unpack_vector(record["vector"], record["dimensions"])
-        profile_json = json.dumps(profile, ensure_ascii=False, sort_keys=True)
-        self.db.execute("INSERT INTO embedding_encoders VALUES (?,?,?) ON CONFLICT(encoder_id) DO NOTHING",
-                        (record["encoder_id"], profile_json, now()))
-        keys = ("photo_id", "encoder_id", "analysis_id", "content_version", "text_hash", "recipe_version",
-                "dimensions", "dtype", "normalized", "vector", "vector_hash", "token_count", "truncated", "created_at")
-        update = ",".join(f"{key}=excluded.{key}" for key in keys[2:])
-        self.db.execute("INSERT INTO photo_embeddings VALUES (" + ",".join("?" for _ in keys) +
-                        ") ON CONFLICT(photo_id,encoder_id) DO UPDATE SET " + update, tuple(record[key] for key in keys))
 
     def latest_analysis_failure(self, photo_id):
         # Runs retain their existing JSON format; this query reads only matching failures.

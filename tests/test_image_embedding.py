@@ -27,7 +27,7 @@ from photography_lib.index_lock import execution_lock
 from photography_lib.image_embedding_storage import IMAGE_EMBEDDING_TABLES, profile_identity, timestamp
 from photography_lib.image_embedding import create_plan, execute_plan, embedding_status, inspect_embedding, job, resolve_profile
 from photography_lib import image_embedding
-from photography_lib.sqlite_storage import SQLiteStorage
+from photography_lib.sqlite_storage import SCHEMA_VERSION, SQLiteStorage
 
 
 PROFILE = {"profile_schema": "image-embedding-profile-v1", "embedding_kind": "image_text_semantic",
@@ -118,8 +118,8 @@ class ImageEmbeddingTests(unittest.TestCase):
     def result_count(self):
         return self.store.db.execute("SELECT COUNT(*) FROM image_embedding_results").fetchone()[0]
 
-    def test_fresh_schema_eight_and_independent_profile_configuration(self):
-        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], 8)
+    def test_current_schema_and_independent_profile_configuration(self):
+        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
         tables = {row[0] for row in self.store.db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
         self.assertTrue(set(IMAGE_EMBEDDING_TABLES).issubset(tables))
         self.assertFalse(any(name.startswith(("image_index_", "technical_")) for name in tables))

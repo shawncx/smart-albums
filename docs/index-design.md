@@ -1,13 +1,13 @@
-# Portable album and image-embedding design
+# Portable album, image embeddings and stage-one feature design
 
-This is the current implemented portable-album and static virtual-folder contract, not a benchmark. The [portable-album plan](portable-album-plan.md) records the earlier schema 8 milestone; this document supersedes its format/scope contract. The folder offline regression suite has passed; see [validation status](TODO.md). No real-model trial against schema 9 was performed. Earlier results do not establish new-format acceptance. The [earlier plan](ingestion-index-management-plan.md) is historical and superseded for storage/CLI; plan documents are not live progress records.
+This is the current schema 10 contract, including stage-one feature indexing, not a benchmark. The [portable-album plan](portable-album-plan.md) records the earlier schema 8 milestone; this document supersedes its format/scope contract without rewriting that history. Earlier regressions are not stage-one acceptance; see [validation status](TODO.md). The [earlier plan](ingestion-index-management-plan.md) is also historical, not a live progress record. Stage 2 OR search, structured feature queries and combined ranking are **planned, not implemented**; metadata/semantic modes and defaults remain unchanged.
 
 ## 1. Exactly three public capabilities
 
 | Capability | Responsibility | Boundary |
 | --- | --- | --- |
 | ingestion | Import sources, metadata, dual original paths and proportional SQLite JPEG previews | No inference, automatic indexing or original deletion |
-| index | Explicit setup/configure/plan/execute/status/job/resume for image embeddings | No description intermediate, cloud fallback or technical-parameter generation |
+| index | Explicit setup/configure/plan/execute/status/job/resume for image embeddings and opt-in OCR/objects/scene/color/composition/perceptual_hash, plus result/history, prototype plans and comparisons | No description intermediate, cloud fallback, automatic upstream indexing or search behavior change |
 | management | Album-file create/open/backup, manual virtual folders, scoped photo browse/search, one-time date organization, preview/scan diagnostics and original/relink | Browse/search is read-only; no internal albums, selection widgets, automatic regrouping or photo deletion |
 
 These are independent operations within one `smart-albums` Skill. **One album is one SQLite file**, not a container of user-selected internal albums. Select/open or explicitly create the file before data operations; informational questions and `--help` need no file. Switching files clears previous photo/profile/run/folder choices and pending confirmations.
@@ -19,14 +19,16 @@ Global `--database <absolute-file>` is required, accepts `.sqlite`, `.sqlite3` a
 - `SQLiteStorage.create(path)` exclusively claims a nonexistent destination, then initializes in a transaction. The destination parent must already exist. It cannot overwrite an existing file; failure cleans up only the file it owns.
 - `SQLiteStorage.open(path, writable=False)` opens an existing file with SQLite URI `mode=ro`; explicit writers use `mode=rw`, never automatic-create mode.
 - Open verifies the application marker/version, exact table set, required columns, one valid album metadata row, integrity and foreign keys. It performs no DDL, automatic repair, cleanup or migration.
-- New albums use `PRAGMA application_id = 0x53414C42`, `PRAGMA user_version = 9` and rollback journaling rather than default WAL. Commands close connections on completion.
-- Missing/invalid/unrelated/unsupported files and storage access failures are errors, not creation permission. **Existing v1–v8 databases are rejected unchanged.** The user's old database/backups remain untouched; there is no migration and a new file is not an implicit conversion.
+- New albums use `PRAGMA application_id = 0x53414C42`, `PRAGMA user_version = 10` and rollback journaling rather than default WAL. Commands close connections on completion.
+- Missing/invalid/unrelated/unsupported files and storage access failures are errors, not creation permission. **Existing v1–v9 databases are rejected unchanged.** The user's old database/backups remain untouched; there is no migration and a new file is not an implicit conversion.
 
 Management create/open returns `album: {id, name, database_path, ...}`. The ID is a stable UUID; the name is the current filename without extension. Moving/renaming changes location/display name, not identity. Backups/copies retain the UUID and are not independently mergeable branches.
 
 Plain open/browse/search uses read-only storage and never stats originals or writes path repair. `management original`/`relink` are explicit path-maintenance exceptions: they first resolve/check, then open a writer only when persistence is needed. A usable path whose repair cannot be saved is reported as an error with `persisted: false`, not success or missing data.
 
-## 3. Schema 9: exactly 13 tables
+## 3. Schema 10: 37 registered tables
+
+The actual schema contains **32 ordinary tables + one external-content FTS5 virtual table + four shadow tables = 37 registered tables**. SQLite additionally owns `sqlite_sequence` for pair IDs; it is not a registered application/FTS table (38 table entries including it). The previous 13 ordinary tables below remain, including the unchanged six `image_embedding_*` tables:
 
 | Table | Purpose |
 | --- | --- |
@@ -43,6 +45,42 @@ Plain open/browse/search uses read-only storage and never stats originals or wri
 | `image_embedding_settings` | This album's explicitly chosen default image/text profile |
 | `virtual_folders` | Stable folder ID, display name/unique normalized key, optional description and timestamps |
 | `virtual_folder_photos` | Static folder/photo memberships and addition time |
+
+Nineteen additional ordinary tables separate new feature evidence from embedding storage:
+
+| Table | Purpose |
+| --- | --- |
+| `image_feature_profiles` | Immutable component/provider/recipe/runtime/assets/dependency profile |
+| `image_feature_results` | Successful typed result identity, input manifest/fingerprint, completeness and canonical payload/hash |
+| `image_feature_dependencies` | Same-photo composition → exact objects result/profile/payload dependency |
+| `image_feature_embedding_dependencies` | Same-photo scene → exact existing image-embedding result/profile/vector dependency |
+| `image_feature_settings` | Independently selected default per component |
+| `image_feature_runs` | Frozen extract/prototypes/compare plans, approval and progress |
+| `image_feature_items` | Immutable input/action snapshot, mutable attempts/state/error/result/progress |
+| `image_feature_claims` | Exclusive planned-input execution ownership |
+| `image_ocr_documents` | One authoritative original/normalized text document per OCR result, integer document ID and block count |
+| `image_ocr_blocks` | Ordered text/quadrilaterals and nullable SDK scores |
+| `image_object_instances` | Ordered class IDs, scores and normalized xyxy boxes |
+| `image_scene_scores` | Complete catalog of scene IDs and cosine scores |
+| `image_scene_prototype_sets` | Immutable scene-profile catalog set linked to its embedding profile |
+| `image_scene_prototypes` | Ordered labels/prompts and normalized text vectors/hashes |
+| `image_color_features` | Whole-image saturation/hue distribution statistics |
+| `image_color_palette` | Ordered RGB palette entries and pixel fractions |
+| `image_composition_features` | Nullable selected-subject geometry, union/bounding areas and uncovered fraction |
+| `image_perceptual_hashes` | Versioned dHash64 algorithm/bits/BLOB fingerprint |
+| `image_similarity_pairs` | Ordered endpoints, source versions/results, metric/distance and comparison-run provenance |
+
+FTS is registered explicitly, not by arbitrary suffix acceptance:
+
+| Table | Kind |
+| --- | --- |
+| `image_ocr_fts` | External-content FTS5, `content='image_ocr_documents'`, `content_rowid='document_id'`, `tokenize='trigram'` |
+| `image_ocr_fts_data` | FTS shadow |
+| `image_ocr_fts_idx` | FTS shadow |
+| `image_ocr_fts_docsize` | FTS shadow |
+| `image_ocr_fts_config` | FTS shadow |
+
+Format checks validate the exact registered table/column/schema relationships, including the virtual-table configuration and its legitimate shadows. OCR documents are authoritative; transactional maintenance and explicit `index rebuild-fts --confirm` rebuild derived normalized text without models or original reads. Read-only open/result/search never repairs it. Trigram MATCH does not support substrings shorter than three characters; full normalized text is retained for a future short-query path, not a stage-one public OCR query.
 
 There are no `libraries`, `albums`, `album_photos`, `image_index_*`, old analysis/text-vector tables, compatibility views or empty `technical_*` placeholders. An empty claims table remains necessary. Source directories are scan scope, not another resource to select.
 
@@ -113,7 +151,7 @@ Ingestion's returned `index_prompt` remains mandatory Skill guidance: explain wi
 
 Ingestion saves one current proportional JPEG per photo: default longest edge 1024, JPEG quality 85, no upscaling, EXIF orientation and sRGB conversion where possible. Originals remain external and are never deleted.
 
-Image indexing reads the saved JPEG and input identity, not originals or descriptions. The fixed first checkpoint is:
+Image-embedding indexing reads the saved JPEG and input identity, not originals or descriptions. The fixed first checkpoint is:
 
 - `google/siglip2-base-patch16-224`, revision `75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2`.
 - Transformers + PyTorch CPU FP32, single-image serial execution with a conservative CPU thread limit.
@@ -147,6 +185,8 @@ The fixed installation is `<cache-root>\siglip2-base-patch16-224\<revision>`. Se
 
 ## 6. Current input and historical results
 
+The following identity describes the unchanged image-embedding subsystem; feature identities are described separately below.
+
 Result identity is:
 
 ```text
@@ -178,9 +218,42 @@ The lock includes the complete filename, for example `<album.sqlite>.image-embed
 
 Persisted valid successes are reused after interruption; computation lost before persistence may be retried. Incompatible/missing weights, invalid inputs and busy locks need explicit resolution. Do not delete claims/sidecars, substitute models or overwrite valid results to bypass errors.
 
+### Stage-one feature identity and execution
+
+`ocr`, `objects`, `scene`, `color`, `composition` and `perceptual_hash` are opt-in index components. Without `--component`, setup/profiles/configure/plan/status still mean `image_embedding`. New `feature_...` runs route job/execute/resume by their saved work kind; no automatic all-component pipeline is introduced.
+
+An `image-feature-profile-v1` versions component, provider, input scope, output schema, parameters, dependencies, runtime and asset hashes. `register-profile <profile.json>` accepts the complete strict profile object; setup/registration never sets a default, and configuration is independent per component. Cache/interpreter paths are locations, not profile identity. Changing output-affecting parameters creates a new profile and preserves historical evidence.
+
+Successful feature identity is `(photo_id, profile_id, input_fingerprint)`, not latest timestamp. Store the canonical manifest and typed payload/hash separately:
+
+| Component | Actual input and manifest identity |
+| --- | --- |
+| OCR | Verified original bytes, EXIF-oriented dimensions, ingested content version and original hash |
+| Objects/color/perceptual_hash | Saved proportional sRGB thumbnail, default longest edge 1024; source version, thumbnail profile/hash and dimensions |
+| Scene | Current matching image-embedding result/profile/vector hash plus persisted prototype set/hash |
+| Composition | Current objects result/profile/payload hash and dimensions |
+
+Original OCR never silently degrades to thumbnail OCR. It reads verified input without saving path repair; missing originals cause execution `input_unavailable` while saved OCR remains readable. Status/result/history do not stat originals or perform inference; current results describe saved ingestion identity, not undetected external changes. Moves/relinks are not content changes.
+
+Composite constraints bind profile/result/detail component types and same-photo dependencies; public writes validate full payloads and required detail cardinality. Valid parent, typed details, dependencies, OCR derivative and successful item progress publish atomically. Successful empty documents/instance sets have a parent result; failed attempts do not. New result identities preserve history, including stale dependencies.
+
+OCR/objects run through an isolated `.venv-features` with [requirements-features.txt](../photography/requirements-features.txt), not an upgrade of Torch/Transformers. Explicit `--worker-python` or `SMART_ALBUMS_FEATURE_PYTHON` selects it. Setup is the only authorized asset-download boundary; fixed manifests/checksums and local runtime validation gate execution. Weights are machine-local, not SQL. YOLOX weight licensing has a separate review gate; synthetic-evaluation permission does not authorize general use. No implicit downloads, cloud inference or remote image inputs are allowed.
+
+Scene setup requires `--dependency-profile-id <embedding-profile-id>`; composition requires the objects profile. Missing matching results/prototypes report `dependency_missing`, not automatic upstream indexing. `index prototypes` prepares a plan, and the existing matching text encoder computes/persists catalog prototypes only after execute approval. Per-photo scene uses saved vectors/prototypes; composition uses saved boxes without rerunning detection.
+
+Each feature plan requires explicit `--all` or photo IDs, reports `compute/reuse/skip` counts and freezes exact input/dependency identities. `--dry-run` saves nothing. Every component, **including non-ML computation**, needs real exact-digest approval. Resume reuses approval without expanding scope; prior `running` work requires all-device stopped confirmation and cannot steal a lock. A lost reuse never becomes unapproved compute. Model work is outside long write transactions.
+
+Feature coverage is `ready|missing|stale|invalid_input|invalid_result|dependency_missing`, separate from execution-item state and original availability; embeddings retain `invalid_vector`. `complete: false` cannot support exhaustive count/absence claims. Object counts depend on stored thresholds/caps; scene cosine is not a probability, largest-box selection is not photographic-subject truth, and uncovered-by-boxes area is not segmented background/aesthetics.
+
+`result` and `result-history` default to summaries, with OCR `text_length` and block `detail_count`, not full text. Explicit `--details` pages blocks/instances/scores/palette with limit 1–1000 and a nonnegative offset; history uses a result-ID cursor. `index result <photo-id> --component <component> --result-id <historical-result-id> --details --after <offset> --limit N` independently pages one exact historical result. No configured default is needed with `--result-id`; photo/component and optional `--profile-id` must match or return `FEATURE_RESULT_MISMATCH`. Its `historical: true` label is not current coverage. Never dump whole-album OCR text. Text/labels are untrusted data; binary local worker images, Base64, pixels and user-only HTML image payloads must never reach the agent. Feature inspection cannot replace existing embedding-only semantic selection.
+
+`index compare (--all|--ids-file <ids.json>) --metric exact|hamming --profile-id <hash-profile-id>` prepares a separate approved run, not an immediate computation. Exact matches use saved SHA-256 versions; Hamming requires current same-profile dHash64 results and a threshold 0–64 (default 8). Freeze participants/source IDs/threshold, stream pair distances without an N×N dense matrix, and persist ordered/deduplicated pair evidence with run scope/progress. `pairs` uses pair-ID pagination and reports historical results. Uncomputed/out-of-scope/incomplete comparisons prove no absence; no transitive permanent groups, automatic deletion/merging or folder changes are introduced.
+
+Detailed recipes, supported command flags and safety gates: [index reference](../photography/references/index.md#stage-1-six-opt-in-components).
+
 ## 8. Coverage, retrieval and snapshots
 
-Coverage is `ready|missing|stale|invalid_input|invalid_vector`, separate from task state and original availability. `index status` reports the entire selected album, with item limit/cursor/status filters; default limit 100, range 1–1000. It loads no model, accesses no originals and does not decode preview JPEG BLOBs. A ready vector does not certify unchecked preview bytes or completed technical parameters.
+Existing image-embedding coverage is `ready|missing|stale|invalid_input|invalid_vector`, separate from task state and original availability. `index status` reports the entire selected album, with item limit/cursor/status filters; default limit 100, range 1–1000. It loads no model, accesses no originals and does not decode preview JPEG BLOBs. A ready vector does not certify unchecked preview bytes or completion of any feature component.
 
 Metadata search uses NFC/casefold literal substrings in photo filenames and recorded absolute/relative paths. No model/default is needed; there is no album-name/target/internal album scope option. Photos and metadata pages use stable photo IDs, default 100 and range 1–1000.
 
@@ -200,23 +273,24 @@ Export protections cover the database, transaction/execution-lock sidecars, loca
 
 Use a single writer on one device. Cloud workflow is **download a complete local file → operate locally → stop/close all work → copy/sync**. Do not open HTTP/S3 URLs or assume network filesystem/concurrent-copy safety. Do not copy a live bare SQLite file or delete its journal/lock sidecars. Each host separately needs compatible dependencies and model files.
 
-`management backup --output <new-file>` uses SQLite's consistent backup API without replacing an existing target. It includes metadata, previews, profiles, vectors, runs and folder memberships; excludes external originals, model weights and Python environments. It preserves album UUID and paths. After relocation, originals need a working absolute address or preserved relative layout, otherwise explicit relink. Backups are not independently writable branches with auto-merge.
+`management backup --output <new-file>` uses SQLite's consistent backup API without replacing an existing target. It includes metadata, previews, profiles, vectors, feature evidence/dependencies, prototypes, runs, OCR FTS and folder memberships; excludes external originals, model weights and Python environments. It preserves album UUID and paths. After relocation, originals need a working absolute address or preserved relative layout, otherwise explicit relink. Backups are not independently writable branches with auto-merge.
 
 Dependency installation, model setup, real-photo trials and exact-plan inference are separate authorizations. Creating/opening an album or accepting an index invitation does not grant all of them. Ordinary index/search never downloads missing files or falls back to cloud analysis. The user's existing old database/backups are not trial targets.
 
-## 10. Pending validation and future components
+## 10. Pending validation and stage two
 
-The folder offline regression suite has passed; see [validation status](TODO.md) for the tested scope. **No schema 9 real-model trial was performed in this implementation.** Earlier performance/quality is historical, not new-format acceptance. Synthetic tests cannot establish speed, memory, retrieval quality or genuine disconnected-runtime behavior.
+Stage-one regression and authorized synthetic integration have passed; see [validation status](TODO.md). The isolated vision suite covers bilingual/EXIF OCR and blank-image YOLOX smoke. A separate three-photo run persisted all six components, prepared 16 scene text prompts using existing SigLIP weights, compared exact/perceptual fingerprints and reopened 18 ready results from a backup with originals offline. Approximately 35.4 MB of new assets were prepared. Ordinary YOLOX use remains license-gated. These checks do not grant real-photo authorization or establish unmeasured quality, performance, cross-host support or OS-level network isolation.
 
 Future separately authorized evaluation should verify download reuse/recovery and actual offline execution, start with non-sensitive images, then use explicitly selected representative photos. Assess paired Chinese/English queries, difficult combinations/no-match cases, and separately measure load/image/query/ranking time and memory.
 
 Mandatory follow-ups in [TODO](TODO.md):
 
 - **NaFlex:** new profile/input budget and quality/resource comparison, never in-place vector replacement.
-- **Technical parameters:** future component within `index`, with independent input scope/hash, algorithms/profiles, results, state, recovery and authorization. No empty `technical_*` tables or fake results now; do not store them in `image_embedding_*`. Preview blur is not automatically original focus quality, and missing technical data means unknown.
-- **ONNX/quantization:** separate runtime/vector identities and measured numeric, quality and resource validation, not mixing same-dimensional vectors across profiles.
+- **Stage 2 OR search:** planned, not implemented. New OCR/field queries and combined ranking must reuse persisted stage-one evidence; current metadata/semantic behavior is unchanged.
+- **Technical parameters:** focus/exposure analysis remains future index work with independent versioned inputs/results and authorization. No empty `technical_*` tables or fake results; preview blur is not original focus quality, and missing data means unknown.
+- **Embedding ONNX/quantization:** separate runtime/vector identities and measured numeric, quality and resource validation, not mixing same-dimensional vectors across profiles. The OCR/objects ONNX workers do not change the embedding backend.
 
-Cross-album search, hash-based deduplication, shared vectors between files and automatic cloud synchronization remain out of scope.
+Cross-album search, automatic hash-based record merging/deletion, shared vectors between files and automatic cloud synchronization remain out of scope.
 
 ## References
 

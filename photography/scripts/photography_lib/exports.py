@@ -23,7 +23,7 @@ def export_path(output, config, store, suffixes):
             raise PhotographyError("INVALID_ARGUMENT", "Export requires an appropriate file extension.")
         database = Path(store.database_path).resolve()
         protected = [database] + [Path(str(database) + suffix) for suffix in (
-            "-journal", "-wal", "-shm", ".image-embedding.lock",
+            "-journal", "-wal", "-shm", ".image-embedding.lock", ".image-features.lock",
         )]
         cache = Path(config.model_cache_root).expanduser().absolute()
         if any(path.is_relative_to(root) for path in (requested, target) for root in (cache, cache.resolve())):

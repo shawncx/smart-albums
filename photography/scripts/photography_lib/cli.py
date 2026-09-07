@@ -39,8 +39,8 @@ def main(argv=None):
         else:
             create = args.command == "management" and args.management_command == "create"
             writable = args.command == "index" and (
-                args.index_command in ("setup", "configure", "execute", "resume")
-                or args.index_command == "plan" and not args.dry_run)
+                args.index_command in ("setup", "configure", "execute", "resume", "register-profile", "rebuild-fts")
+                or args.index_command in ("plan", "prototypes", "compare") and not args.dry_run)
             if args.command == "management" and args.management_command == "folders":
                 from .management_cli import FOLDER_WRITES
 

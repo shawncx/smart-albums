@@ -12,6 +12,9 @@ from uuid import UUID, uuid4
 
 from .config import Config, PhotographyError
 from .image_embedding_storage import IMAGE_EMBEDDING_SCHEMA, IMAGE_EMBEDDING_TABLES, ImageEmbeddingStorage
+from .image_feature_storage import (
+    FEATURE_ALL_TABLES, IMAGE_FEATURE_SCHEMA, ImageFeatureStorage, feature_schema_registry,
+)
 from .thumbnails import validate_preview
 from .virtual_folder_storage import VIRTUAL_FOLDER_SCHEMA, VIRTUAL_FOLDER_TABLES, VirtualFolderStorage
 
@@ -21,7 +24,7 @@ def now() -> str:
 
 
 APPLICATION_ID = 0x53414C42
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 SCHEMA = (
     """CREATE TABLE album_metadata (
@@ -95,6 +98,7 @@ REQUIRED_COLUMNS = {
     "virtual_folders": {"folder_id", "name", "name_key", "description", "created_at", "updated_at"},
     "virtual_folder_photos": {"folder_id", "photo_id", "added_at"},
 }
+REQUIRED_COLUMNS.update(feature_schema_registry()[1])
 
 PHOTO_REQUIRED_FIELDS = (
     "photo_id", "original_absolute_path", "content_version", "thumbnail_profile",
@@ -145,7 +149,7 @@ def _publish_new(temporary: Path, destination: Path) -> None:
         raise PhotographyError("DATABASE_EXISTS", f"Destination appeared during creation and was not overwritten: {destination}") from exc
 
 
-class SQLiteStorage(ImageEmbeddingStorage, VirtualFolderStorage):
+class SQLiteStorage(ImageEmbeddingStorage, ImageFeatureStorage, VirtualFolderStorage):
     def __init__(self, *args, **kwargs):
         raise PhotographyError("STORAGE_OPEN_REQUIRED", "Use SQLiteStorage.create(path) or SQLiteStorage.open(path).")
 
@@ -179,7 +183,7 @@ class SQLiteStorage(ImageEmbeddingStorage, VirtualFolderStorage):
             with store.transaction():
                 store.db.execute(f"PRAGMA application_id={APPLICATION_ID}")
                 store.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-                for statement in (*SCHEMA, *IMAGE_EMBEDDING_SCHEMA, *VIRTUAL_FOLDER_SCHEMA):
+                for statement in (*SCHEMA, *IMAGE_EMBEDDING_SCHEMA, *VIRTUAL_FOLDER_SCHEMA, *IMAGE_FEATURE_SCHEMA):
                     store.db.execute(statement)
                 store.db.execute("INSERT INTO album_metadata VALUES (1,?,?)", (str(uuid4()), now()))
                 store._validate_format()
@@ -237,10 +241,10 @@ class SQLiteStorage(ImageEmbeddingStorage, VirtualFolderStorage):
         if version != SCHEMA_VERSION:
             raise PhotographyError("SCHEMA_UNSUPPORTED", f"Unsupported album schema version: {version}.")
         tables = {row[0] for row in self.db.execute(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+            "SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*'")}
         expected = {
             "album_metadata", "photos", "thumbnails", "scans", "scan_events",
-            *IMAGE_EMBEDDING_TABLES, *VIRTUAL_FOLDER_TABLES,
+            *IMAGE_EMBEDDING_TABLES, *VIRTUAL_FOLDER_TABLES, *FEATURE_ALL_TABLES,
         }
         if tables != expected:
             raise PhotographyError("SCHEMA_INVALID",
@@ -250,6 +254,7 @@ class SQLiteStorage(ImageEmbeddingStorage, VirtualFolderStorage):
             missing = REQUIRED_COLUMNS[table] - columns
             if missing:
                 raise PhotographyError("SCHEMA_INVALID", f"Album table {table} is missing required columns: {sorted(missing)}.")
+        self.validate_feature_schema()
         records = self.db.execute("SELECT singleton,album_uuid,created_at FROM album_metadata").fetchall()
         if len(records) != 1 or records[0]["singleton"] != 1:
             raise PhotographyError("SCHEMA_INVALID", "Album metadata must contain exactly one singleton record.")

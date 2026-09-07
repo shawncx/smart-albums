@@ -53,14 +53,18 @@ invalid folders error and empty scopes stay empty. Optional confirmed date plans
 and selected-search additions are one-time conveniences, not automatic regrouping
 or live rules. All memberships travel inside SQLite backups/moves.
 
-New albums use schema 9 with 13 tables, including
+New albums use schema 10 with 37 registered tables (32 ordinary, one external-content
+FTS5 virtual table and four explicitly registered shadows; excluding internal `sqlite_sequence`), including
 `virtual_folders(folder_id, name, name_key, description, created_at, updated_at)` and
 `virtual_folder_photos(folder_id, photo_id, added_at)`. Management reports use
-`album-snapshot-v2` with historical album/folder scope. Old v1–v8 databases are rejected unchanged,
+`album-snapshot-v2` with historical album/folder scope. Old v1–v9 databases are rejected unchanged,
 not migrated, emptied or overwritten. Cross-file search, merging albums, shared
 photo/vector records and automated cloud synchronization are outside this version.
 
 See [management](management.md) for original-path maintenance and exports,
 [ingestion](ingest.md) for stable path identity, and [index](index.md) for confirmed
-embedding work. Stop all writers before moving/syncing files; a portable database
+embedding and six opt-in feature components. Their profiles/results, dependencies,
+scene text prototypes and OCR derivative travel with backups; weights do not.
+Stage 2 OR search is planned, not implemented; metadata/semantic defaults are unchanged.
+Stop all writers before moving/syncing files; a portable database
 does not imply that originals or a compatible runtime are available on another host.

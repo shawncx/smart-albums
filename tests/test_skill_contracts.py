@@ -1,10 +1,25 @@
+from contextlib import closing
 from pathlib import Path
 import re
+import shlex
+import sqlite3
+import sys
 import unittest
 from urllib.parse import unquote
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "photography" / "scripts"))
+
+from photography_lib.cli import parser
+from photography_lib.feature_profiles import COMPONENTS
+from photography_lib.image_embedding_storage import IMAGE_EMBEDDING_SCHEMA, IMAGE_EMBEDDING_TABLES
+from photography_lib.image_feature_storage import (
+    FEATURE_ALL_TABLES, FEATURE_FTS_SHADOW_TABLES, FEATURE_FTS_TABLE,
+    IMAGE_FEATURE_SCHEMA, IMAGE_FEATURE_TABLES,
+)
+from photography_lib.sqlite_storage import SCHEMA, SCHEMA_VERSION
+from photography_lib.virtual_folder_storage import VIRTUAL_FOLDER_SCHEMA
 
 
 class SkillContractTests(unittest.TestCase):
@@ -90,16 +105,25 @@ class SkillContractTests(unittest.TestCase):
                        "do not read its HTML image payloads"):
             self.assertIn(phrase, section)
 
-    def test_current_guides_describe_schema_nine_without_migration(self):
+    def test_current_guides_describe_actual_schema_ten_without_migration(self):
+        with closing(sqlite3.connect(":memory:")) as database:
+            for statement in (*SCHEMA, *IMAGE_EMBEDDING_SCHEMA, *VIRTUAL_FOLDER_SCHEMA, *IMAGE_FEATURE_SCHEMA):
+                database.execute(statement)
+            tables = {row[0] for row in database.execute(
+                "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+        self.assertEqual(SCHEMA_VERSION, 10)
+        self.assertEqual(len(IMAGE_EMBEDDING_TABLES), 6)
+        self.assertEqual(len(tables), 13 + len(FEATURE_ALL_TABLES))
+        ordinary_count = len(tables) - 1 - len(FEATURE_FTS_SHADOW_TABLES)
         documents = [ROOT / "README.md", ROOT / "photography" / "SKILL.md",
                      ROOT / "docs" / "index-design.md", ROOT / "docs" / "TODO.md"]
         documents += list((ROOT / "photography" / "references").glob("*.md"))
         for document in documents:
             text = document.read_text(encoding="utf-8")
             with self.subTest(document=document.name):
-                self.assertIn("schema 9", text.lower())
-                self.assertRegex(text, r"13 (?:tables|张表)")
-                self.assertIn("v1–v8", text)
+                self.assertIn(f"schema {SCHEMA_VERSION}", text.lower())
+                self.assertRegex(text, rf"{len(tables)} (?:registered tables|张注册表)")
+                self.assertIn("v1–v9", text)
                 self.assertRegex(text, r"rejected unchanged|原样拒绝")
                 self.assertRegex(text, r"no (?:automatic )?migration|not migrated|not reinitialized or migrated|不迁移")
                 self.assertIn("virtual_folders", text)
@@ -107,6 +131,16 @@ class SkillContractTests(unittest.TestCase):
                 self.assertIn("album-snapshot-v2", text)
                 self.assertNotIn("album-snapshot-v1", text)
         design = (ROOT / "docs" / "index-design.md").read_text(encoding="utf-8")
+        self.assertIn(f"{ordinary_count} ordinary tables", design)
+        self.assertIn("external-content FTS5", design)
+        self.assertIn("sqlite_sequence", design)
+        documented_tables = set(re.findall(r"^\| `([^`]+)` \|", design, re.MULTILINE))
+        self.assertTrue(tables <= documented_tables, tables - documented_tables)
+        self.assertIn("content='image_ocr_documents'", design)
+        self.assertIn("content_rowid='document_id'", design)
+        self.assertIn("tokenize='trigram'", design)
+        self.assertTrue(set(IMAGE_FEATURE_TABLES) <= tables)
+        self.assertTrue({FEATURE_FTS_TABLE, *FEATURE_FTS_SHADOW_TABLES} <= documented_tables)
         for columns in (
                 "virtual_folders(folder_id, name, name_key, description, created_at, updated_at)",
                 "virtual_folder_photos(folder_id, photo_id, added_at)"):
@@ -249,8 +283,168 @@ class SkillContractTests(unittest.TestCase):
         self.assertIn("198 项，197 通过，1 项", text)
         self.assertIn("后续合同说明", text)
         self.assertIn("保留 schema 8 便携相册计划及其验收历史", text)
-        for phrase in ("index-design.md", "schema 9", "13 张表", "album-snapshot-v2", "v1–v8"):
+        for phrase in ("index-design.md", "schema 10", "37 张注册表", "album-snapshot-v2", "v1–v9"):
             self.assertIn(phrase, text)
+
+    def test_feature_components_remain_opt_in_inside_index(self):
+        expected = {"ocr", "objects", "scene", "color", "composition", "perceptual_hash"}
+        self.assertEqual(set(COMPONENTS), expected)
+        skill = (ROOT / "photography" / "SKILL.md").read_text(encoding="utf-8")
+        section = skill.split("## index", 1)[1].split("## management", 1)[0]
+        component_rows = set(re.findall(r"^\| `([^`]+)` \|", section, re.MULTILINE))
+        self.assertEqual(component_rows, expected)
+        for token in ("--component", "image_embedding", "opt-in", "not new public capabilities",
+                      "register-profile", "never select a default", "independently per component"):
+            self.assertIn(token, section)
+        cli = parser()
+        prefix = ["--database", str(ROOT / "contract-only.sqlite"), "index"]
+        for arguments in (["setup"], ["profiles"], ["configure", "--default-profile", "profile"],
+                          ["plan", "--all"], ["status"]):
+            with self.subTest(arguments=arguments):
+                self.assertEqual(cli.parse_args(prefix + arguments).component, "image_embedding")
+                for component in COMPONENTS:
+                    self.assertEqual(
+                        cli.parse_args(prefix + arguments + ["--component", component]).component, component)
+
+    def test_documented_feature_commands_parse_without_execution(self):
+        cli = parser()
+        values = {
+            "component": "color", "status": "ready", "offset": "0", "pair-id": "0",
+            "feature-run-id": "feature_contract", "run-id": "run_contract",
+            "absolute-python": str(ROOT / ".venv-features" / "Scripts" / "python.exe"),
+            "absolute-worker-python": str(ROOT / ".venv-features" / "Scripts" / "python.exe"),
+        }
+        required = {
+            "setup", "profiles", "configure", "register-profile", "plan", "execute", "status",
+            "result", "result-history", "job", "resume", "prototypes", "compare", "pairs", "rebuild-fts",
+        }
+        for name in ("photography/SKILL.md", "photography/references/index.md"):
+            text = (ROOT / name).read_text(encoding="utf-8")
+            commands = re.findall(r"^index .+$", text, re.MULTILINE)
+            observed = set()
+            for command in commands:
+                for include_optional in (False, True):
+                    expanded = re.sub(r"\[([^\[\]]*)\]", r"\1" if include_optional else "", command)
+                    expanded = re.sub(r"<([^>]+)>", lambda match: values.get(match[1], match[1]), expanded)
+                    expanded = re.sub(r"\bN\b", "20", expanded)
+                    for metric in ("exact", "hamming"):
+                        arguments = shlex.split(expanded.replace("exact|hamming", metric), posix=False)
+                        with self.subTest(document=name, arguments=arguments):
+                            parsed = cli.parse_args(["--database", str(ROOT / "contract-only.sqlite"), *arguments])
+                            observed.add(parsed.index_command)
+                            if parsed.index_command == "result":
+                                self.assertIsInstance(parsed.after, int)
+                            elif parsed.index_command == "result-history":
+                                self.assertIsInstance(parsed.after, str)
+            self.assertTrue(required <= observed, required - observed)
+
+    def test_feature_input_history_and_dependency_contracts_are_explicit(self):
+        for name in ("photography/SKILL.md", "photography/references/index.md", "docs/index-design.md"):
+            text = (ROOT / name).read_text(encoding="utf-8")
+            with self.subTest(document=name):
+                for token in ("input_fingerprint", "profile_id", "1024", "original",
+                              "thumbnail", "prototype", "objects", "dependency_missing",
+                              "--dependency-profile-id", "history"):
+                    self.assertIn(token, text)
+                self.assertRegex(text, r"(?i)paths[^.\n]{0,100}not (?:profile identity|content)|not paths")
+                self.assertRegex(text, r"do not stat originals|without[^.\n]{0,100}original stat")
+                self.assertRegex(text, r"(?i)(?:never|not)[^.\n]{0,100}(?:latest|newest) timestamp")
+        skill = (ROOT / "photography" / "SKILL.md").read_text(encoding="utf-8")
+        section = skill.split("### Stage 1:", 1)[1].split("## management", 1)[0]
+        for token in ("Do not automatically index all photos", "input_unavailable",
+                      "never silently substitutes a thumbnail", "preserve historical"):
+            self.assertIn(token.casefold(), section.casefold())
+
+    def test_historical_result_details_have_independent_paging_without_default(self):
+        documents = ("README.md", "photography/SKILL.md", "photography/references/index.md",
+                     "photography/references/management.md", "docs/index-design.md")
+        for name in documents:
+            text = (ROOT / name).read_text(encoding="utf-8")
+            with self.subTest(document=name):
+                for token in ("--result-id", "--details", "--after", "--limit", "--profile-id",
+                              "FEATURE_RESULT_MISMATCH", "historical: true"):
+                    self.assertIn(token, text)
+                self.assertRegex(text, r"(?i)no configured default is needed")
+                self.assertRegex(text, r"photo/component")
+                self.assertRegex(text, r"(?i)not (?:a )?current[- ]coverage")
+        cli = parser()
+        for component in COMPONENTS:
+            arguments = ["--database", str(ROOT / "contract-only.sqlite"), "index", "result",
+                         "photo-contract", "--component", component, "--result-id", "historical-contract",
+                         "--details", "--after", "20", "--limit", "10"]
+            with self.subTest(component=component):
+                parsed = cli.parse_args(arguments)
+                self.assertIsNone(parsed.profile_id)
+                self.assertEqual(parsed.result_id, "historical-contract")
+                self.assertEqual(parsed.photo_id, "photo-contract")
+                self.assertEqual(parsed.component, component)
+                self.assertTrue(parsed.details)
+                self.assertEqual((parsed.after, parsed.limit), (20, 10))
+                self.assertEqual(cli.parse_args(arguments + ["--profile-id", "profile-contract"]).profile_id,
+                                 "profile-contract")
+
+    def test_feature_plans_cover_non_ml_prototypes_compare_and_explicit_fts(self):
+        for name in ("photography/SKILL.md", "photography/references/index.md"):
+            text = (ROOT / name).read_text(encoding="utf-8")
+            section = text.split("Stage 1:", 1)[1]
+            with self.subTest(document=name):
+                for token in ("non-ML", "exact", "digest", "compute/reuse/skip", "feature_",
+                              "--dry-run", "--confirm-stopped", "prototypes", "compare",
+                              "--metric exact|hamming", "N×N dense matrix", "pairs",
+                              "rebuild-fts --confirm"):
+                    self.assertIn(token, section)
+                self.assertRegex(section, r"(?i)only after execute approval")
+                self.assertRegex(section, r"(?i)(?:never|no)[^.\n]{0,80}(?:steal|stealing)")
+                self.assertRegex(section, r"(?i)never automatically delete/merge photos")
+                self.assertRegex(section, r"(?i)(?:explicitly writes|separately requested write)")
+                self.assertRegex(section, r"(?i)(?:uncomputed|incomplete)[^.\n]{0,180}(?:prove|establish)")
+
+    def test_feature_read_status_empty_results_and_ocr_privacy_are_separate(self):
+        coverage = {"ready", "missing", "stale", "invalid_input", "invalid_result", "dependency_missing"}
+        for name in ("photography/SKILL.md", "photography/references/index.md"):
+            text = (ROOT / name).read_text(encoding="utf-8")
+            section = text.split("Stage 1:", 1)[1]
+            with self.subTest(document=name):
+                documented_states = [set(value.split("|")) for value in re.findall(
+                    r"`([a-z_]+(?:\|[a-z_]+)+)`", section)]
+                self.assertIn(coverage, documented_states)
+                for token in ("execution-item state", "complete: false", "empty", "not computed",
+                              "text_length", "detail_count", "--details", "offset", "result ID",
+                              "1–1000", "whole-album OCR", "untrusted data", "Base64",
+                              "pixel", "HTML", "embedding-only"):
+                    self.assertIn(token.casefold(), section.casefold())
+                self.assertRegex(section, r"(?i)(?:no|not) full (?:OCR )?text")
+                self.assertRegex(section, r"(?i)(?:never|do not)[^.\n]{0,180}(?:send|pass)[^.\n]{0,180}agent")
+
+    def test_feature_runtime_download_and_acceptance_are_not_implicit(self):
+        for name in ("README.md", "photography/SKILL.md", "photography/references/index.md"):
+            text = (ROOT / name).read_text(encoding="utf-8")
+            with self.subTest(document=name):
+                for token in (".venv-features", "requirements-features.txt", "--worker-python",
+                              "SMART_ALBUMS_FEATURE_PYTHON", "checksum", "offline",
+                              "synthetic", "35.4", "performance"):
+                    self.assertIn(token.casefold(), text.casefold())
+                self.assertRegex(text, r"(?i)(?:unmeasured[^.\n]{0,160}performance"
+                                       r"|performance[^.\n]{0,180}do not follow)")
+                self.assertRegex(text, r"(?i)licens(?:e|ing)")
+                self.assertRegex(text, r"(?i)(?:never|not) (?:SQLite|SQL)|no weights[^.\n]{0,100}SQL")
+                self.assertRegex(text, r"(?i)(?:no implicit|without[^.\n]{0,100}download"
+                                      r"|(?:not|never)[^.\n]{0,100}automatic downloads)")
+        self.assertTrue((ROOT / "photography" / "requirements-features.txt").is_file())
+
+    def test_stage_two_search_is_planned_not_implemented_and_defaults_unchanged(self):
+        documents = [ROOT / "README.md", ROOT / "photography" / "SKILL.md", ROOT / "docs" / "index-design.md"]
+        documents += list((ROOT / "photography" / "references").glob("*.md"))
+        for document in documents:
+            text = document.read_text(encoding="utf-8")
+            with self.subTest(document=document.name):
+                self.assertRegex(text, r"Stage 2 OR search")
+                self.assertRegex(text, r"planned, (?:\*\*)?not implemented|planned, not implemented")
+                self.assertRegex(text, r"(?i)metadata/semantic")
+                self.assertRegex(text, r"(?i)(?:unchanged|remain unchanged)")
+        text = (ROOT / "docs" / "TODO.md").read_text(encoding="utf-8")
+        for token in ("第二阶段 OR 搜索", "尚未实现", "未验证", "35.4"):
+            self.assertIn(token, text)
 
 
 if __name__ == "__main__":

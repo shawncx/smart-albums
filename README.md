@@ -5,7 +5,7 @@
 | Capability | Purpose |
 | --- | --- |
 | **ingestion** | Import local photo metadata, original paths and proportional JPEG previews into the selected album. |
-| **index** | Explicitly set up/configure, plan, generate/reuse, inspect and resume local image embeddings. |
+| **index** | Explicitly set up/configure, plan, generate/reuse, inspect and resume image embeddings or six opt-in local feature components. |
 | **management** | Create/open/backup the album file, manually manage static virtual folders, browse/search within explicit scopes, organize by saved date and locate/relink originals. |
 
 These are not an automatic pipeline. Ingestion never calls a model. Browse/search never writes the database or checks original files; creation, folder membership and original-path maintenance are explicit management operations. The program never deletes originals or automatically regroups folders.
@@ -55,7 +55,9 @@ Fully indexed repeat scans do not prompt again. Importing, accepting the invitat
 
 ## index: explicit setup, configuration and execution
 
-Install optional dependencies in a dedicated compatible CPython 3.14 x64 virtual environment. Model download and real-model trials require separate authorization; code approval is not that authorization.
+**Stage 1 only:** `ocr`, `objects`, `scene`, `color`, `composition` and `perceptual_hash` are components inside index, not six new public capabilities. Existing commands without `--component` still select `image_embedding`; ingestion invitations and metadata/semantic search defaults are unchanged. Stage 2 OR search, structured feature queries and combined ranking are **planned, not implemented**.
+
+Install image-embedding dependencies in a dedicated compatible CPython 3.14 x64 virtual environment. Model download and real-model trials require separate authorization; code approval is not that authorization.
 
 ```text
 python -m pip install -r photography\requirements-index.txt
@@ -75,6 +77,54 @@ The fixed model is `google/siglip2-base-patch16-224`, revision `75de2d55ec2d0b4e
 The persisted product is a **768-dimensional, whole-image semantic image vector in a paired image/text space**: `embedding_kind: image_text_semantic`, `stored_modality: image`, `input_scope: stored_thumbnail`, `granularity: whole_image`. Matching text-query vectors are transient. This is not caption generation, object detection, focus/blur measurement or another technical analysis.
 
 `index resume <run-id>` reuses existing inference approval. If the saved status is `running`, it additionally requires `--confirm-stopped` after confirming workers on **all devices** have stopped. This flag cannot steal a live OS lock. Cache-only work loads no model and cannot expand into encoding. See [index reference](photography/references/index.md).
+
+### Six opt-in feature components
+
+| Component | Input and saved evidence |
+| --- | --- |
+| `ocr` | Verified, EXIF-oriented original bytes; RapidOCR/PP-OCRv6-small text, normalized text, blocks and available scores |
+| `objects` | Stored proportional preview (default longest edge 1024); YOLOX Nano 416 CPU ONNX instances, scores and normalized boxes |
+| `scene` | Existing matching image vectors plus persisted, versioned text prototypes; full catalog cosine scores |
+| `color` | Stored sRGB preview; versioned palette, hue and saturation statistics |
+| `composition` | Existing objects result; deterministic box geometry, not aesthetics or segmentation |
+| `perceptual_hash` | Stored preview dHash64; explicit comparisons use current fingerprints or saved SHA-256 content versions |
+
+OCR/objects use an isolated `.venv-features` with [requirements-features.txt](photography/requirements-features.txt), not an upgrade of the embedding environment. After explicit installation/download authorization:
+
+```text
+python -m venv .venv-features
+.\.venv-features\Scripts\python.exe -m pip install -r photography\requirements-features.txt
+```
+
+Select its absolute interpreter with `--worker-python` on feature setup/plan/execute/resume, or `SMART_ALBUMS_FEATURE_PYTHON`. Weights stay in the machine-local cache, never SQLite; setup verifies fixed asset checksums, and execution is offline with no implicit downloads. YOLOX weight licensing requires explicit review; synthetic-evaluation permission is not general-use approval. See [runtime and asset gates](photography/references/index.md#feature-runtime-and-assets).
+
+Append these commands to the same script/database prefix:
+
+```text
+index setup --component color
+index setup --component ocr --worker-python <absolute-worker-python>
+index setup --component composition --dependency-profile-id <objects-profile-id>
+index setup --component scene --dependency-profile-id <embedding-profile-id>
+index profiles --component color
+index configure --component color --default-profile <profile-id>
+index register-profile <profile.json>
+index plan --component color --ids-file <photo-ids.json> --profile-id <profile-id>
+index execute <feature-run-id> --confirm <digest>
+index result <photo-id> --component ocr --profile-id <profile-id>
+index result <photo-id> --component ocr --profile-id <profile-id> --details --limit 20 --after 0
+index result-history <photo-id> --component ocr --profile-id <profile-id> --limit 20
+index result <photo-id> --component ocr --result-id <historical-result-id> --details --after 0 --limit 20
+index prototypes --profile-id <scene-profile-id> --dry-run
+index compare --ids-file <photo-ids.json> --metric hamming --max-distance 8 --profile-id <hash-profile-id>
+index pairs <feature-run-id> --limit 100 --after 0
+index rebuild-fts --confirm
+```
+
+Setup/registration never selects a default; each component has its own configuration. `prototypes` and `compare` **prepare plans**, not computations; execute the returned `feature_...` run only after exact-digest approval, including non-ML computations. Omit `--dry-run` to persist a prototype plan. Text encoding happens only during approved prototype execution; scene and composition report `dependency_missing` rather than automatically indexing other components or the whole album.
+
+Feature status is `ready|missing|stale|invalid_input|invalid_result|dependency_missing`, separate from execution-item state. Profiles version output-affecting parameters/assets/recipes; `input_fingerprint` binds content and exact dependencies, not paths. History remains inspectable. Status/result reads do not stat originals or run inference; a ready OCR result describes the last ingested content, not live disk verification.
+
+Results default to summaries (OCR `text_length` and block `detail_count`), with explicitly requested, paged `--details`; never dump whole-album OCR text. `result-history` pages result IDs; `result --result-id` reads that exact historical result and pages its details independently by offset. No configured default is needed for an explicit result ID; the photo/component and optional `--profile-id` must match, otherwise `FEATURE_RESULT_MISMATCH`. Its `historical: true` response is not current coverage. A successful empty result differs from not computed; `complete: false` cannot prove exhaustive counts or absence. Pair comparison streams distances without an N×N dense matrix; absent pairs outside a completed scope prove nothing. It never deletes/merges photos or changes folders. `rebuild-fts --confirm` is an explicit write rebuilding only derived text from saved documents, without originals/models.
 
 ## management: manual folders, scoped search and maintenance
 
@@ -141,15 +191,15 @@ Relink requires matching SHA-256 and updates both paths. Path-only repair preser
 
 Models are shared machine-local files, independent of albums: `Config.model_cache_root` defaults to `%LOCALAPPDATA%\SmartAlbums\models` on Windows or the platform's application cache elsewhere. Optional global `--model-cache-dir <cache-root>` precedes `index` or `management` and works consistently for setup, execution and semantic search. A known older model cache can be reused by explicitly selecting its root; it is not automatically moved or deleted.
 
-Use **one writer on one device at a time**. For cloud storage: download a complete local file, operate locally, stop/close all operations, then copy or sync it back. Do not copy an actively written bare SQLite file or delete its sidecars. `management backup --output <new-file>` makes a consistent no-overwrite SQLite snapshot containing previews, embeddings and virtual folder memberships, **not originals, model weights or Python environments**. Each host needs its own compatible runtime/cache.
+Use **one writer on one device at a time**. For cloud storage: download a complete local file, operate locally, stop/close all operations, then copy or sync it back. Do not copy an actively written bare SQLite file or delete its sidecars. `management backup --output <new-file>` makes a consistent no-overwrite SQLite snapshot containing previews, embeddings, feature results/prototypes and virtual folder memberships, **not originals, model weights or Python environments**. Each host needs its own compatible runtime/cache.
 
 ## Format and validation status
 
-New albums use **schema 9**, `application_id = 0x53414C42`, and exactly **13 tables**: `album_metadata`, `photos`, `thumbnails`, `scans`, `scan_events`, `image_embedding_profiles/results/runs/items/claims/settings`, `virtual_folders(folder_id, name, name_key, description, created_at, updated_at)` and `virtual_folder_photos(folder_id, photo_id, added_at)`. There are no internal albums/libraries, legacy image-index/text-analysis tables or empty `technical_*` placeholders.
+New albums use **schema 10**, `application_id = 0x53414C42`, and **37 registered tables**: 32 ordinary tables, one external-content OCR FTS5 virtual table and four explicitly registered shadow tables (SQLite's internal `sqlite_sequence` is excluded). The existing six `image_embedding_*` tables and `virtual_folders` / `virtual_folder_photos` remain separate from the new feature profiles/results, typed details, manifests, dependencies and jobs. See the [complete schema inventory](docs/index-design.md#3-schema-10-37-registered-tables). No internal albums/libraries or empty `technical_*` placeholders are added.
 
-Existing v1–v8 databases are **rejected unchanged**: no migration, cleanup, overwrite or old CLI/API compatibility. The user's old database and backups must remain untouched. Existing static reports are not converted into new album snapshots.
+Existing v1–v9 databases are **rejected unchanged**: no migration, cleanup, overwrite or old CLI/API compatibility. The user's old database and backups must remain untouched. Management snapshots remain `album-snapshot-v2`; existing static reports are not converted.
 
-The virtual-folder offline regression suite has passed; see [validation status](docs/TODO.md) for its scope. **No real-model trial against the new format was performed in this implementation.** Earlier v7 measurements are not new-format acceptance. Synthetic tests cannot establish real retrieval quality, latency, memory or actual disconnected operation.
+Stage-one regression and authorized synthetic integration have passed; see [validation status](docs/TODO.md). The isolated vision suite passed 27 tests, and all six components persisted results for three synthetic photos; 18 results remained readable from a backup with originals offline. Downloaded assets total 35,408,916 bytes (approximately 35.4 MB), with existing SigLIP weights reused. This covers **synthetic evaluation only**; ordinary YOLOX use remains license-gated. Real-photo quality, performance, cross-host support and OS-level network-isolation guarantees do not follow from these checks.
 
 ```text
 python -m unittest discover -s tests -v

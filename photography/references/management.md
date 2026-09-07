@@ -2,6 +2,10 @@
 
 Management is one of the three public Skill capabilities. **Plain browse/search is read-only**; album creation, manual virtual folder writes, explicit original/relink and exports/backups are separate operations. Management does not generate image embeddings, install models, create internal albums or offer automatic regrouping/curation.
 
+Stage 1 adds six opt-in [index components](index.md#stage-1-six-opt-in-components), not new management queries. Stage 2 OR search, OCR/field conditions, duplicate-search UI and combined ranking are **planned, not implemented**; metadata/semantic modes and defaults remain unchanged. Explicit `index result`/`result-history` inspect saved feature evidence; `compare` prepares a confirmed computation and `pairs` reads historical evidence. Neither automatically deletes/merges photos nor changes folders. Feature details are not permission to rerank existing semantic candidates or pass images to the agent.
+
+For paged historical feature details, use `index result <photo-id> --component <component> --result-id <historical-result-id> --details --after <offset> --limit N`. No configured default is needed with an explicit result ID; photo/component and any optional `--profile-id` must match (`FEATURE_RESULT_MISMATCH` otherwise). Preserve `historical: true`; this read-only inspection is not current coverage or new search evidence.
+
 ## Commands
 
 Use the selected interpreter and album:
@@ -46,9 +50,9 @@ There is no `--target`, internal album/library scope, `--model-dir`, `--state-di
 
 Start with [album-file selection](library.md). `create` requires explicit permission and a new path in an existing directory; it never overwrites. `open` validates an existing file read-only and returns the album's stable UUID, filename-derived name, absolute database path, photo count and embedding coverage. It does not create a file, perform DDL, migrate or retain a background connection.
 
-New albums use schema 9/application ID `0x53414C42`, with 13 tables and no internal albums. Old v1–v8 files are rejected unchanged, with no migration. The added tables are `virtual_folders(folder_id, name, name_key, description, created_at, updated_at)` and `virtual_folder_photos(folder_id, photo_id, added_at)`. Do not use a missing/old database as permission to create a replacement or modify the user's old database/backups.
+New albums use schema 10/application ID `0x53414C42`, with 37 registered tables: 32 ordinary, one external-content FTS5 virtual table and four explicitly registered shadows (excluding internal `sqlite_sequence`), with no internal albums. Old v1–v9 files are rejected unchanged, with no migration. `virtual_folders(folder_id, name, name_key, description, created_at, updated_at)` and `virtual_folder_photos(folder_id, photo_id, added_at)` are unchanged. Feature storage remains separate from the existing six embedding tables; see the [schema inventory](../../docs/index-design.md#3-schema-10-37-registered-tables). Do not use a missing/old database as permission to create a replacement or modify the user's old database/backups.
 
-`management backup --output <new-file>` creates a consistent SQLite snapshot using SQLite's backup API. Existing destinations are refused. It preserves album UUID/data, including previews/embeddings/runs and folder memberships, but not external originals, weights or runtimes. Use one device writer; stop all operations before moving/copying/cloud-syncing the local file. Backup copies are not concurrent branches with automatic merge.
+`management backup --output <new-file>` creates a consistent SQLite snapshot using SQLite's backup API. Existing destinations are refused. It preserves album UUID/data, including previews/embeddings, feature results/dependencies, scene prototypes, OCR FTS, runs and folder memberships, but not external originals, weights or runtimes. Use one device writer; stop all operations before moving/copying/cloud-syncing the local file. Backup copies are not concurrent branches with automatic merge.
 
 ## Manual custom virtual folders: primary workflow
 
@@ -198,4 +202,4 @@ Exports protect the database, journal/WAL/shared-memory/execution-lock sidecars,
 
 HTML escapes data, embeds validated previews and binds them to the snapshot's album/input identities. Changed/missing/corrupt previews display errors instead of substitute images. No original access is required. There are no selection checkboxes, membership controls, live server or retained `search-add` protocol.
 
-The folder offline regression suite has passed; see [validation status](../../docs/TODO.md) for its scope. No new-format real-model trial was performed; previous v7 results and synthetic tests do not establish new-format quality, memory, timing or cross-host runtime support.
+Historical folder regressions do not validate stage-one features; see [validation status](../../docs/TODO.md). Claim no real-model performance, quality, memory, timing, disconnected operation or cross-host support without recorded verification; synthetic tests and authorization alone are not acceptance.

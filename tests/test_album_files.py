@@ -119,7 +119,7 @@ class AlbumFileTests(unittest.TestCase):
             SQLiteStorage(self.path)
         self.assertFalse(self.path.exists())
 
-    def test_create_returns_open_writable_v9_album_with_exact_tables(self):
+    def test_create_returns_open_writable_v10_album_with_exact_tables(self):
         with SQLiteStorage.create(self.path) as store:
             self.assertTrue(store.writable)
             self.assertEqual(store.database_path, self.path)
@@ -128,10 +128,10 @@ class AlbumFileTests(unittest.TestCase):
             self.assertEqual(store.db.execute("PRAGMA journal_mode").fetchone()[0], "delete")
             self.assertEqual(store.db.execute("PRAGMA foreign_keys").fetchone()[0], 1)
             tables = {row[0] for row in store.db.execute(
-                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*'")}
             self.assertEqual(tables, set(REQUIRED_COLUMNS))
-            self.assertEqual(len(tables), 13)
-            self.assertEqual(SCHEMA_VERSION, 9)
+            self.assertEqual(len(tables), 37)
+            self.assertEqual(SCHEMA_VERSION, 10)
             self.assertEqual(store.photos(), [])
             album = store.album()
             self.assertEqual(album["name"], self.path.stem)
@@ -257,7 +257,7 @@ class AlbumFileTests(unittest.TestCase):
                 self.assertEqual(before, self.snapshot())
 
     def test_all_previous_versions_are_rejected_without_migration(self):
-        for version in range(1, 9):
+        for version in range(1, 10):
             path = self.base / f"v{version}.sqlite"
             with SQLiteStorage.create(path) as store:
                 store.db.execute("DROP TABLE virtual_folder_photos")
@@ -456,7 +456,7 @@ class AlbumFileTests(unittest.TestCase):
             self.assertEqual(stored.album()["name"], "backup")
             self.assertEqual(stored.photo("photo_a"), photo)
             self.assertEqual(stored_preview(photo, stored), data)
-            self.assertEqual(stored.db.execute("PRAGMA user_version").fetchone()[0], 9)
+            self.assertEqual(stored.db.execute("PRAGMA user_version").fetchone()[0], SCHEMA_VERSION)
         self.assertEqual(self.path.read_bytes(), before)
 
     def test_backup_does_not_overwrite_destination_or_source(self):

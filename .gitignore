@@ -2,6 +2,7 @@ __pycache__/
 *.py[cod]
 .venv/
 .venv-index/
+.venv-features/
 .photography-state/
 .agents/
 .dev-deps/
@@ -22,6 +23,7 @@ artifacts/
 *.sqlite3-wal
 *.sqlite3-shm
 *.image-embedding.lock
+*.image-features.lock
 .sa-*.tmp
 *.pem
 *.key

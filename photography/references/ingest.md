@@ -40,7 +40,7 @@ The database records original/display dimensions, format, basic camera/exposure/
 
 Index's official SigLIP **224×224 square resize happens only at inference**. It does not replace these stored proportional previews with square ones.
 
-Only ingestion updates content versions. Changed source content or preview profile/hash invalidates old image-embedding results for current queries. Historical rows and other profiles remain intact; no model is run during scanning. A repaired preview with exactly the same input identity can reuse an existing valid result. Old preview bytes may be replaced; preserving vectors is not a promise to replay historical images.
+Only ingestion updates content versions. Changed source content or preview profile/hash invalidates affected image-embedding and feature results according to their input/dependency manifests. Historical rows and other profiles remain intact; no model is run during scanning. A repaired preview with exactly the same input identity can reuse an existing valid result. Old preview bytes may be replaced; preserving vectors is not a promise to replay historical images.
 
 ## Portable paths and stable identity
 
@@ -66,6 +66,8 @@ scanned = added + updated + restored + unchanged + failed
 ```
 
 `index_summary` describes saved image-embedding state with `component: image_embedding`; `index_scope` is `successful_photos_in_this_scan`. `model_calls` is zero. Without a configured default, the summary has `status: not_configured`, a null profile and the successful-photo total, not inferred search coverage. The scan summary is not the whole album's coverage or proof of completed technical analysis.
+
+The invitation still concerns only `image_embedding`. Stage-one `ocr`, `objects`, `scene`, `color`, `composition` and `perceptual_hash` require a separate explicit component/scope choice and exact-plan approval, including non-ML computation. OCR execution verifies original bytes; other pixel-consuming components use saved thumbnails, and derived components require existing results. Ingestion does not run any of them or auto-fill dependencies. Stage 2 OR search is planned, not implemented; metadata/semantic defaults are unchanged. See [feature indexing](index.md#stage-1-six-opt-in-components).
 
 When `index_suggested` is true, `index_prompt` contains an explicit question asking whether to create/update the semantic-search index, plus `component`, `photo_count`, exact `photo_ids`, `profile_id`, `configuration_required` and `requires_confirmation: true`. It also includes `without_index`, `with_index` and `limitations`: browsing, previews/basic metadata, filename/recorded-path lookup, custom folder CRUD, manual single/batch membership changes, folder-name search and confirmed EXIF date organization work without indexing; a valid index plus its compatible local model adds Chinese/English visual-content semantic search. Semantic scores rank candidates, not guaranteed detections or exact filters.
 
@@ -97,8 +99,8 @@ Photo/preview updates use short per-photo transactions with identity rechecks, n
 
 ## Storage and validation boundary
 
-Only schema 9/application ID `0x53414C42` albums with 13 tables are supported. The added tables are `virtual_folders(folder_id, name, name_key, description, created_at, updated_at)` and `virtual_folder_photos(folder_id, photo_id, added_at)`. Old v1–v8 databases are rejected unchanged; there is no migration, retired-table cleanup or old CLI compatibility. Existing user databases and backups remain untouched. Management exports use `album-snapshot-v2` with historical album/folder scope.
+Only schema 10/application ID `0x53414C42` albums with 37 registered tables are supported: 32 ordinary, one external-content FTS5 virtual table and four explicitly registered shadows, excluding internal `sqlite_sequence`. The unchanged `virtual_folders` / `virtual_folder_photos` and six `image_embedding_*` tables remain separate from feature evidence. Old v1–v9 databases are rejected unchanged; there is no migration, retired-table cleanup or old CLI compatibility. Existing user databases and backups remain untouched. Management exports use `album-snapshot-v2` with historical album/folder scope.
 
-Use `management backup --output <new-file>` for a consistent SQLite snapshot; it includes saved previews/embeddings and folder memberships, not originals or weights. Stop operations before moving/cloud-syncing the local album, and use one device writer at a time.
+Use `management backup --output <new-file>` for a consistent SQLite snapshot; it includes saved previews/embeddings, feature results/prototypes and folder memberships, not originals or weights. Stop operations before moving/cloud-syncing the local album, and use one device writer at a time.
 
-The folder offline regression suite has passed. No new-format real-model trial was performed; prior v7 performance is not new-format acceptance. See [index design](../../docs/index-design.md) and [validation status and pending work](../../docs/TODO.md).
+Historical folder regressions do not validate stage-one features or real-model performance. See [index design](../../docs/index-design.md) and [validation status and pending work](../../docs/TODO.md); claim only recorded verification, not success inferred from synthetic-test or download authorization.

@@ -4,7 +4,7 @@
 
 修订：2026-09-06。本版明确 `image_embedding_*` 命名、向量的输入/用途，以及未来技术参数的独立边界。
 
-> 后续合同说明：本文保留 schema 8 便携相册计划及其验收历史，不追改为新功能记录。当前静态 virtual folder 合同见 [现行设计](index-design.md)：schema 9、13 张表，新增 `virtual_folders` 与 `virtual_folder_photos`，采用 `album-snapshot-v2`；v1–v8 原样拒绝、不迁移。手动自定义 CRUD/单张或批量成员管理是基础能力，范围搜索和一次性日期/搜索结果加入均属 management，不引入自动归类或第四能力。
+> 后续合同说明：本文保留 schema 8 便携相册计划及其验收历史，不追改为新功能记录。当前见 [现行设计](index-design.md)：schema 10、37 张注册表（32 普通 + 1 external-content FTS5 + 4 显式影子表，不计内部 `sqlite_sequence`），v1–v9 原样拒绝、不迁移。`virtual_folders`、`virtual_folder_photos`、`album-snapshot-v2` 及原 embedding 六表保留；六项 opt-in feature 属 index，基础三能力不变。第二阶段 OR 搜索/组合排序计划中、尚未实现，不改变现有 metadata/semantic 默认或 embedding-only 展示。此说明不是新模型性能验收记录。
 
 ## 1. 已确认目标
 

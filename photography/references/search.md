@@ -9,6 +9,8 @@ management search "<Chinese or English visual query>" --mode semantic --profile-
 
 Prefix commands with `python <skill-directory>\scripts\photography.py --database <absolute-album.sqlite>`. Optional global `--model-cache-dir <cache-root>` also goes before `management`, consistently with index setup/execution. See [management](management.md) for pagination, result fields and read-only HTML/JSON exports.
 
+**Stage 1 does not change search.** The six opt-in [feature components](index.md#stage-1-six-opt-in-components) can save/inspect evidence and explicit comparison pairs, but Stage 2 OR search, OCR/field queries, duplicate-search UI and combined ranking are **planned, not implemented**. Metadata/semantic modes and defaults remain unchanged. Persisted OCR FTS is storage preparation, not a new public query. Do not use OCR/objects/scene/color/composition/hash details to rerank or verify existing semantic candidates.
+
 ## Explicit virtual folder scope
 
 `management photos` and both search modes accept repeatable `--folder-id <id>` and `--folder-match union|intersection`. Multiple distinct IDs require the operator; duplicates of one ID do not. No IDs means the entire album. Invalid folders are errors, never fallback; empty folders/intersections return empty results without loading an encoder. Semantic search still requires a valid explicit/configured profile.
@@ -57,6 +59,6 @@ JSON/HTML uses `album-snapshot-v2`, identifies the album UUID/path and preserves
 
 These JSON/HTML exports have no selection controls or membership writes; there is no live search server or retained `search-add` protocol. Old databases/reports are not migrated or converted into this format; do not restore the removed description-analysis runtime.
 
-Only schema 9 with 13 tables is supported, including `virtual_folders` and `virtual_folder_photos`; v1–v8 databases are rejected unchanged with no migration.
+Only schema 10 with 37 registered tables is supported: 32 ordinary, one external-content FTS5 virtual table and four explicitly registered shadows (excluding internal `sqlite_sequence`), including unchanged `virtual_folders` and `virtual_folder_photos`; v1–v9 databases are rejected unchanged with no migration.
 
-The folder offline regression suite has passed; see [validation status](../../docs/TODO.md). No new-format real-model trial was performed in this implementation, and earlier v7 performance does not establish new-format retrieval quality, latency, memory or offline-runtime acceptance.
+Historical folder regressions do not validate stage-one features; see [validation status](../../docs/TODO.md). No real-model performance, retrieval quality, latency, memory or disconnected-runtime claim follows from synthetic tests or authorization alone.

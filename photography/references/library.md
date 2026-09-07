@@ -37,8 +37,10 @@ aliases and internal album/library options are removed, not compatibility entry 
 
 `create` initializes a private temporary file and publishes it without replacing
 an existing destination, including a file that appears during creation. Backups
-use the same no-overwrite publication boundary. The new album has schema 9,
-application ID `0x53414C42`, exactly 13 tables and one album UUID. `open` uses a read-only
+use the same no-overwrite publication boundary. The new album has schema 10,
+application ID `0x53414C42`, 37 registered tables and one album UUID: 32 ordinary,
+one external-content FTS5 virtual table and four explicitly registered shadows
+(excluding internal `sqlite_sequence`). `open` uses a read-only
 connection, validates format/integrity and returns identity/counts/coverage. It
 performs no DDL, repairs or migration, creates nothing and retains no background
 connection. No installed model/default is needed to open or browse an album.
@@ -48,13 +50,13 @@ and `database_path` (actual absolute location). Moving or renaming the file chan
 its location/display name, not its UUID. Copies/backups preserve that same identity;
 they are not independently mergeable branches.
 
-Existing v1–v8 databases are rejected unchanged; unrelated SQLite files and damaged
+Existing v1–v9 databases are rejected unchanged; unrelated SQLite files and damaged
 files also error, not reinitialized or migrated. Keep old user databases and backups untouched.
 Creating a separately requested new album is not a conversion of the old one.
 See [storage design](../../docs/index-design.md).
 
 Virtual folders are static, flat many-to-many collections inside this one album,
-not another album/file selector. The two added tables are
+not another album/file selector. Their unchanged tables are
 `virtual_folders(folder_id, name, name_key, description, created_at, updated_at)` and
 `virtual_folder_photos(folder_id, photo_id, added_at)`. Manual custom CRUD/add/remove
 is primary and needs no index; the Skill writes a one-element ID array for a single
@@ -65,6 +67,9 @@ There is no automatic regrouping, hierarchy or fourth capability.
 See [management](management.md) for folder commands, explicit union/intersection
 browse/search scope and confirmed one-time EXIF date plans. Reports use
 `album-snapshot-v2`, preserving historical scope even after folder changes.
+Stage-one [feature components](index.md#stage-1-six-opt-in-components) are explicit
+index operations, not new capabilities or automatic work when opening a file.
+Stage 2 OR search is planned, not implemented; metadata/semantic defaults are unchanged.
 
 ## Portable originals
 
@@ -125,7 +130,8 @@ or competing per-device copies as if distributed locking existed. Model files an
 compatible Python environments must be provisioned separately on each host.
 
 `management backup` uses SQLite's consistent backup API and refuses an existing
-destination. It includes saved metadata, previews, profiles, vectors, runs and folder memberships, but
+destination. It includes saved metadata, previews, profiles, vectors, feature evidence/dependencies,
+scene prototypes, OCR FTS, runs and folder memberships, but
 not originals or model/runtime files. A moved backup can browse saved previews;
 originals resolve only if an absolute location or relative layout still works.
 Otherwise explicitly relink them. Do not write independently to both copies and
@@ -135,5 +141,6 @@ A saved run still marked `running` requires confirmation that all old workers ha
 stopped before `index resume <run-id> --confirm-stopped`; the flag does not bypass
 a live OS lock or grant missing inference approval.
 
-The folder offline regression suite has passed; see [validation status](../../docs/TODO.md). No new-format real-model trial was
-performed in this implementation; old v7 results do not verify this workflow.
+Historical folder regressions do not validate stage-one features; see
+[validation status](../../docs/TODO.md). Real-model performance and disconnected
+operation are not claimed without recorded verification.

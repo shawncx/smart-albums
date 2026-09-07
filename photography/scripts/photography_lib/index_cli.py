@@ -4,10 +4,10 @@ from .source_paths import absolute_candidate, relative_candidate
 
 
 def add_commands(commands):
-    root = commands.add_parser("index", help="Whole-image semantic embeddings; no technical-parameter inference.")
+    root = commands.add_parser("index", help="Explicit image embeddings and opt-in local feature components.")
     actions = root.add_subparsers(dest="index_command", required=True)
-    actions.add_parser("setup", help="Explicitly install/verify model files and register their profile.")
-    actions.add_parser("profiles", help="List this album's image-embedding profiles.")
+    setup = actions.add_parser("setup", help="Explicitly install/verify model files and register their profile.")
+    profiles = actions.add_parser("profiles", help="List this album's profiles for the selected component.")
     configure = actions.add_parser("configure", help="Explicitly select this album's default image/text profile.")
     configure.add_argument("--default-profile", required=True)
     plan = actions.add_parser("plan", help="Prepare a frozen scope; no model inference.")
@@ -21,16 +21,22 @@ def add_commands(commands):
     status.add_argument("--profile-id")
     status.add_argument("--limit", type=int, default=100)
     status.add_argument("--after", default="")
-    status.add_argument("--status", choices=("ready", "missing", "stale", "invalid_input", "invalid_vector"))
+    status.add_argument("--status", choices=("ready", "missing", "stale", "invalid_input", "invalid_vector",
+                                           "invalid_result", "dependency_missing"))
     job = actions.add_parser("job", help="Inspect this album's saved embedding plan and attempts.")
     job.add_argument("run_id")
     execute = actions.add_parser("execute", help="Execute an explicitly approved plan.")
     execute.add_argument("run_id")
     execute.add_argument("--confirm", required=True)
+    execute.add_argument("--worker-python", help="Isolated interpreter for a feature run.")
     resume = actions.add_parser("resume", help="Resume the existing approved scope.")
     resume.add_argument("run_id")
     resume.add_argument("--confirm-stopped", action="store_true",
                         help="Confirm a previously running worker, including on another device, has stopped.")
+    resume.add_argument("--worker-python", help="Isolated interpreter for a feature run.")
+    from .feature_cli import add_commands as add_features
+
+    add_features(actions, {"setup": setup, "profiles": profiles, "configure": configure, "plan": plan, "status": status})
 
 
 def model_directory(store, config):
@@ -47,6 +53,15 @@ def model_directory(store, config):
 
 
 def command(args, store, config):
+    from .feature_cli import command as feature_command, handles
+
+    if handles(args):
+        return feature_command(args, store, config)
+    if (getattr(args, "worker_python", None) is not None
+            or getattr(args, "dependency_profile_id", None) is not None):
+        raise PhotographyError("INVALID_ARGUMENT", "Feature worker/dependency options do not apply to image embeddings.")
+    if args.index_command == "status" and args.status in ("invalid_result", "dependency_missing"):
+        raise PhotographyError("INVALID_ARGUMENT", "This status applies to feature components, not image embeddings.")
     from .image_embedding import create_plan, execute_plan, embedding_status, job, resolve_profile
     action = args.index_command
     if action == "profiles":

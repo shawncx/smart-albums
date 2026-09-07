@@ -12,6 +12,7 @@ from uuid import UUID, uuid4
 from .config import PhotographyError
 from .fingerprints import fingerprint
 from .source_paths import photo_filename
+from .semantic_query import encode_query, prepare_query, validate_query_plan
 from .text import fold_text
 from .virtual_folders import resolve_scope
 
@@ -129,6 +130,10 @@ def _search_candidates(snapshot, store):
             or not isinstance(snapshot.get("results"), list)):
         raise PhotographyError("INVALID_ARGUMENT", "Use an original semantic-search candidate snapshot.")
     _query(snapshot.get("query"))
+    if "query_encoding" in snapshot:
+        plan = validate_query_plan(snapshot["query_encoding"])
+        if plan["query"] != snapshot["query"]:
+            raise PhotographyError("INVALID_ARGUMENT", "Search text differs from the frozen query preparation.")
     _limit(snapshot.get("limit"))
     coverage = snapshot.get("coverage")
     if (not isinstance(coverage, dict)
@@ -210,6 +215,8 @@ def select_search_results(snapshot, photo_ids, *, store):
                                  "selected_count": len(results), "not_selected_count": len(candidates) - len(results),
                                  "photo_ids": [item["photo_id"] for item in results],
                                  "scope": "retrieved_candidates", "automatic_classification": False})
+        if "query_encoding" in snapshot:
+            output["query_encoding"] = validate_query_plan(snapshot["query_encoding"])
     return output
 
 
@@ -313,8 +320,9 @@ def metadata_search(query, *, store, limit=100, after="", profile_id=None,
 
 
 def semantic_search(query, *, store, config=None, profile_id=None, limit=10, after=None, encoder=None,
-                    folder_ids=None, folder_match=None):
+                    folder_ids=None, folder_match=None, visual_query=None):
     _query(query)
+    query_plan = prepare_query(query, visual_query)
     _limit(limit)
     if after is not None:
         raise PhotographyError("INVALID_ARGUMENT", "Semantic search uses top-k ranking, not --after cursors.")
@@ -338,7 +346,7 @@ def semantic_search(query, *, store, config=None, profile_id=None, limit=10, aft
                 )}}
                 candidates.append((candidate, vector))
         result = _snapshot("search", store, profile, mode="semantic", scope=scope)
-        result.update(query=query, coverage=counts, coverage_items=entries,
+        result.update(query=query_plan["query"], query_encoding=query_plan, coverage=counts, coverage_items=entries,
                       coverage_scope=_coverage_scope(scope), limit=limit, results=[],
                       display_stage="candidates",
                       selection_evidence="embedding_similarity_only",
@@ -360,13 +368,14 @@ def semantic_search(query, *, store, config=None, profile_id=None, limit=10, aft
     if fingerprint(encoder.profile()) != result["profile_id"]:
         raise PhotographyError("INDEX_PROFILE_MISMATCH", "Query encoder does not match the selected image-embedding profile.")
     started = time.perf_counter()
-    encoding = encoder.encode_text(query)
+    encoding = encode_query(query_plan, encoder)
     query_vector = validate_vector(encoding.vector, profile["dimensions"])
     result["timings"]["query_total_seconds"] = time.perf_counter() - started
     result["timings"]["query_encoding_seconds"] = encoding.elapsed_seconds
     result["timings"]["model_loading_seconds"] = getattr(encoder, "load_seconds", None)
-    result["model_calls"] = 1
-    result["query_token_count"] = encoding.token_count
+    result["model_calls"] = encoding.model_calls
+    result["query_token_counts"] = encoding.token_counts
+    result["query_token_count"] = encoding.token_counts[0] if len(encoding.token_counts) == 1 else None
 
     started = time.perf_counter()
     result["results"] = rank_embedding_candidates(candidates, query_vector)[:limit]

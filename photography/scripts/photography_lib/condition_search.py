@@ -14,6 +14,7 @@ from .config import PhotographyError
 from .feature_predicates import evaluate_conditions
 from .fingerprints import fingerprint
 from .management import rank_embedding_candidates, snapshot_scope
+from .semantic_query import encode_query, prepare_query, validate_query_plan
 from .virtual_folders import resolve_scope
 
 
@@ -81,6 +82,8 @@ def query(raw_query, *, store, config=None, encoder_factory=None):
                                       folder_match=spec["scope"]["match"])
         photo_map = {photo["photo_id"]: _capture_photo(photo, store) for photo in photos}
         conditions = spec["conditions"]
+        query_plans = {condition["id"]: prepare_query(condition["query"], condition.get("visual_query"))
+                       for condition in conditions if condition["kind"] == "semantic"}
         structured = [condition for condition in conditions if condition["kind"] != "semantic"]
         matrix = evaluate_conditions(structured, photos, store=store)
         for condition in conditions:
@@ -124,9 +127,9 @@ def query(raw_query, *, store, config=None, encoder_factory=None):
             encoder = encoders[condition["profile_id"]]
             if fingerprint(encoder.profile()) != condition["profile_id"]:
                 raise PhotographyError("INDEX_PROFILE_MISMATCH", "Query encoder does not match the frozen condition profile.")
-            encoded = encoder.encode_text(condition["query"])
+            encoded = encode_query(query_plans[condition["id"]], encoder)
             vector = validate_vector(encoded.vector, captured["profile"]["dimensions"])
-            calls += 1
+            calls += encoded.model_calls
             ranked = rank_embedding_candidates(captured["candidates"], vector)
         maximum = len(ranked) if spec["semantic_candidates"] == "all" else spec["semantic_candidates"]
         pool.update(item["photo_id"] for item in ranked[:maximum])
@@ -161,6 +164,7 @@ def query(raw_query, *, store, config=None, encoder_factory=None):
                       "semantic_eligible_counts": {key: len(value) for key, value in ranked_by_condition.items()}},
         "candidates": rows, "results": [], "stage": "awaiting_semantic_decisions",
         "query_model_calls": calls, "image_model_calls": 0, "random_seed": spec["random_seed"] or uuid4().hex,
+        "query_encodings": query_plans,
         "ranking_version": None, "normalization": {}, "decisions": None,
         "finalized_at": None, "source_digest": None, "evaluated_coverage": {},
     })
@@ -195,6 +199,8 @@ def _page_evidence(snapshot, condition, page, *, rows=None):
                          ("candidate_rank", "score_gap_from_best", "score_gap_to_next")}})
     identity = {"snapshot_id": snapshot["snapshot_id"], "condition_id": condition["id"],
                 "query": condition["query"], "page": page, "items": items}
+    if "query_encodings" in snapshot:
+        identity["query_encoding"] = deepcopy(snapshot["query_encodings"][condition["id"]])
     return {"schema": "condition-semantic-evidence-v1", **identity,
             "page_id": fingerprint(identity), "page_count": total_pages, "candidate_count": len(rows),
             "selection_evidence": "embedding_similarity_only", "model_calls": 0, "image_model_calls": 0}
@@ -240,7 +246,8 @@ def _resolve_decisions(snapshot, decisions):
 
 
 def _validate_snapshot(snapshot, store):
-    _require(isinstance(snapshot, dict) and set(snapshot) == _FIELDS, "Expected a complete condition-search snapshot.")
+    _require(isinstance(snapshot, dict) and set(snapshot) in (_FIELDS, _FIELDS | {"query_encodings"}),
+             "Expected a complete condition-search snapshot.")
     try:
         json.dumps(snapshot, allow_nan=False)
         _require(snapshot["schema"] == SCHEMA and type(snapshot["schema_version"]) is int
@@ -258,6 +265,18 @@ def _validate_snapshot(snapshot, store):
         canonical = normalize_query(snapshot["query"], store=store)["query"]
         _require(canonical == snapshot["query"], "Snapshot query must be canonical with frozen profiles.")
         conditions = {condition["id"]: condition for condition in canonical["conditions"]}
+        if "query_encodings" in snapshot:
+            plans = snapshot["query_encodings"]
+            _require(isinstance(plans, dict) and set(plans) == {
+                cid for cid, condition in conditions.items() if condition["kind"] == "semantic"},
+                "Each semantic condition needs exactly one frozen query recipe.")
+            for cid, plan in plans.items():
+                _require(validate_query_plan(plan) == prepare_query(
+                    conditions[cid]["query"], conditions[cid].get("visual_query")),
+                    "Query preparation disagrees with the frozen condition.")
+        else:
+            _require(not any("visual_query" in condition for condition in conditions.values()),
+                     "Prepared visual queries require their frozen recipe metadata.")
         _require(isinstance(snapshot["aliases"], dict)
                  and all(_text(key) and value in conditions for key, value in snapshot["aliases"].items())
                  and all(snapshot["aliases"].get(key) == key for key in conditions), "Invalid condition aliases.")
@@ -347,7 +366,9 @@ def _validate_snapshot(snapshot, store):
                      and sum(counts.values()) == snapshot["scope_total"], "Invalid condition coverage counts.")
         retrieval = snapshot["retrieval"]
         semantic_ids = {key for key, value in conditions.items() if value["kind"] == "semantic"}
-        _require(snapshot["query_model_calls"] <= len(semantic_ids), "Too many query model calls for the condition list.")
+        expected_calls = (sum(len(plan["prompts"]) for plan in snapshot["query_encodings"].values())
+                          if "query_encodings" in snapshot else len(semantic_ids))
+        _require(snapshot["query_model_calls"] <= expected_calls, "Too many query model calls for the condition list.")
         _require(isinstance(retrieval, dict) and set(retrieval) == {
             "semantic_retrieval_limited", "unretrieved_photo_count", "semantic_eligible_counts"}
             and type(retrieval["semantic_retrieval_limited"]) is bool
@@ -496,6 +517,8 @@ def summary(snapshot, *, model_calls=0):
             size = snapshot["query"]["review_page_size"]
             semantic.append({"condition_id": condition["id"], "query": condition["query"],
                              "profile_id": condition["profile_id"], "page_count": (count + size - 1) // size})
+            if "query_encodings" in snapshot:
+                semantic[-1]["query_encoding"] = deepcopy(snapshot["query_encodings"][condition["id"]])
     return {"schema": "condition-query-summary-v1", "album": snapshot["album"],
             "snapshot_id": snapshot["snapshot_id"], "stage": snapshot["stage"],
             "scope_total": snapshot["scope_total"], "candidate_count": snapshot["candidate_count"],
@@ -531,6 +554,7 @@ def show_results(snapshot, *, store, limit=100, after=""):
         return {"schema": "condition-search-page-v1", "snapshot_id": snapshot["snapshot_id"],
                 "snapshot_digest": snapshot["digest"], "album": store.album(), "scope": deepcopy(snapshot["scope"]),
                 "conditions": deepcopy(snapshot["query"]["conditions"]), "aliases": deepcopy(snapshot["aliases"]),
+                "query_encodings": deepcopy(snapshot.get("query_encodings", {})),
                 "coverage": deepcopy(snapshot["coverage"]),
                 "evaluated_coverage": deepcopy(snapshot["evaluated_coverage"]),
                 "retrieval": deepcopy(snapshot["retrieval"]), "scope_total": snapshot["scope_total"],

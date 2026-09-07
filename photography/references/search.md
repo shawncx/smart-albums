@@ -4,7 +4,8 @@ Search is part of **management**, not a separate public Skill capability. Existi
 
 ```text
 management search "<filename-or-recorded-path-fragment>" --mode metadata
-management search "<Chinese or English visual query>" --mode semantic --profile-id <profile-id>
+management search "<original query>" --mode semantic --visual-query "<English visual intent>" --profile-id <profile-id>
+management search "搜索带有天空的图片" --mode semantic --visual-query "sky"
 ```
 
 Prefix commands with `python <skill-directory>\scripts\photography.py --database <absolute-album.sqlite>`. Optional global `--model-cache-dir <cache-root>` also goes before `management`, consistently with index setup/execution. See [management](management.md) for pagination, result fields and read-only HTML/JSON exports.
@@ -25,6 +26,8 @@ Folders are static, flat many-to-many collections in one SQLite album. Manual cu
 
 Metadata mode uses Unicode NFC/casefold literal substrings in photo filenames and recorded absolute/relative paths. It needs neither a model nor a default profile. `%` and `_` are literal, not SQL wildcards. It does not search album names, descriptions, other SQLite files or an internal album/library target.
 
+Never translate literal metadata or OCR searches. `--visual-query` is rejected in metadata mode; the semantic preparation below does not apply to literal text.
+
 Results are in stable photo-ID order. Default limit is 100, accepted range 1–1000; follow `next_cursor` with `--after`, retaining the query/profile. A blank query is an error; no matches remain an empty result, not an automatic switch to semantic mode.
 
 ## Semantic: matched image/text space
@@ -35,7 +38,11 @@ The stored image vectors represent whole SQLite previews in a paired semantic sp
 
 Search is offline and read-only. It encodes only the query, reports coverage across the entire selected scope, and never generates missing photo vectors, changes a default, downloads weights, accesses originals or repairs paths. An empty eligible candidate set returns without model loading. Saved `original_status` is not a new filesystem check.
 
-Use the user's Chinese or English query directly, without automatic translation or old description-retrieval prefixes. The current text limit is 64 tokens including EOS; overlong text is rejected, not silently truncated.
+The host agent prepares English visual intent using **text only**, retaining the user's original natural-language request in `query` and supplying `--visual-query`. Preserve all scene, actions, colors, negation and count constraints while removing search verbs. “搜索带有天空的图片” means `sky`, without adding blue, clear, dominant or outdoor restrictions. If faithful translation is uncertain, clarify instead of substituting guessed keywords; never derive intent from images, OCR or album metadata.
+
+Python does not translate. Already-English visual input may omit `--visual-query`; an unprepared non-Latin request fails with `VISUAL_QUERY_REQUIRED`, never a silent fallback. Both semantic entry points use one fixed recipe, `english-visual-intent-v1`: encode the NFC-normalized English visual phrase directly, with no prefix, caption template or ensemble. The frozen recipe has `prompts: [visual_query]` and `weights: [1.0]`, not selectable versions or arbitrary caller prompts/weights. There is exactly one text encoder call per unique semantic condition with eligible vectors (`model_calls: 1` for plain search); no candidates means zero calls. The prompt has a 64-token limit including EOS; `QUERY_TOO_LONG` rejects overflow without truncation or dropping constraints.
+
+Plain snapshots freeze `query_encoding`: `strategy`, original `query`, English `visual_query`, actual `prompts` and `weights`. Preserve it through `show-results` and search-selected folder-add provenance, and show the user the actual encoded text. Query-side preparation leaves the image profile, checkpoint, 768-dimensional vectors and schema 10 unchanged; no image reindexing is required. Recipe traceability is not a measured-quality claim.
 
 Semantic search returns ranked top-K candidates, default 10 and range 1–1000, with photo-ID tie-breaking. It rejects `--after`. Numeric candidates include score/rank/gap information and stable input/result identities, but no filenames, photo metadata, image bytes or thumbnail payloads. Scores are cosine similarities, not probabilities, guaranteed matches, exact count/negation filters or focus/blur measurements. Report missing/stale/invalid coverage rather than implying all photos were searched.
 
@@ -80,7 +87,7 @@ Example `multi-condition-query-v1` input; placeholders must be replaced with dis
   "review_page_size": 100,
   "random_seed": "my-repeatable-query",
   "conditions": [
-    {"id": "A", "kind": "semantic", "query": "beach", "profile_id": "<embedding-id>", "scoring": "graded"},
+    {"id": "A", "kind": "semantic", "query": "搜索带有天空的图片", "visual_query": "sky", "profile_id": "<embedding-id>", "scoring": "graded"},
     {"id": "B", "kind": "object_count", "class_id": "person", "operator": "eq", "value": 2, "score_threshold": 0.3, "profile_id": "<objects-id>", "scoring": "exact"},
     {"id": "C", "kind": "ocr_contains", "text": "海", "profile_id": "<ocr-id>", "scoring": "exact"},
     {"id": "D", "kind": "color_fraction", "color": "blue", "minimum": 0.2, "profile_id": "<color-id>", "scoring": "graded"},
@@ -93,11 +100,13 @@ Example `multi-condition-query-v1` input; placeholders must be replaced with dis
 
 Only top-level `or` is supported; no top-level AND or RRF. IDs are unique, stable nonblank text. Predicate identity excludes `id` and `scoring`, but retains the normalized kind, profile and filter parameters. Identical normalized predicates with the same resolved scoring deduplicate to the first ID and return an `aliases` mapping, including default versus explicitly identical scoring. Conflicting `exact`/`graded` scoring for the same predicate is rejected explicitly, not counted twice or silently merged. Different thresholds remain distinct predicates. Missing profiles resolve the relevant saved default once and freeze an explicit ID; missing configuration is an error, not permission to change defaults. Query values and unknown fields are strictly validated.
 
+Semantic conditions keep original `query` plus optional `visual_query` with the same text-only preparation role as `--visual-query`. Direct English visual input may omit it; non-Latin requests need it for query execution. Semantic duplicate identity uses the prepared visual phrase/profile, not the original request wording. NFC normalization applies both with explicit `visual_query` and to direct English input. Different originals with the same prepared phrase deduplicate once; equivalent English input with the same phrase does too. Keep one logical semantic condition per intent: paraphrases must not increase `matched_count`.
+
 Scope defaults to the whole album (`folder_ids: []`, `match: null`); multiple distinct folders require `union` or `intersection`. Names/membership are captured before candidate retrieval. `semantic_candidates` defaults to 10 per semantic condition, or explicit `"all"`; `review_page_size` defaults to 100, range 1–1000. Omit/null `random_seed` to generate a saved seed; supply a bounded string for explicit reproducibility.
 
 | Kind | Predicate and scoring |
 | --- | --- |
-| `semantic` | One matching text encoder call per unique condition with eligible vectors; `graded` only. Scores/ranks/gaps propose candidates, never automatic matches. |
+| `semantic` | Encode the prepared English visual phrase directly: one text call per unique condition with eligible vectors, otherwise zero. `graded` only. Scores/ranks/gaps propose candidates, never automatic matches. |
 | `object_count` | Complete saved instances; `operator: eq|ge|le`, nonnegative integer `value`, supported `class_id`, threshold at least the profile's saved floor. Exact scoring. Missing/incomplete evidence is unknown, not zero. |
 | `ocr_contains` | NFKC/casefold/whitespace-normalized literal substring. 1–2 characters use scoped `INSTR`; 3+ use trigram candidates plus literal `INSTR` confirmation. `%`, `_`, quotes and FTS operators stay literal. One photo hits once, snippet at most 160 characters; exact scoring. |
 | `color_fraction` | Versioned `hsv-palette-v1` fraction at least `minimum` in [0,1]. Named colors black/white/gray/red/orange/yellow/green/cyan/blue/purple/magenta. Exact or graded (higher fraction). |
@@ -109,7 +118,9 @@ Scope defaults to the whole album (`folder_ids: []`, `match: null`); multiple di
 
 `query` returns only `condition-query-summary-v1` and the output path. The saved `condition-search-snapshot-v1` is private: **the agent must not read the private snapshot file or feature matrix**. Only programmatic structured predicates inspect saved feature cells. For semantic relevance, do not consult OCR, scene labels, other condition hits, metadata, filenames, screenshots or pixels.
 
-Use `query-evidence` for each semantic condition and page (0-based, default 0). Its `condition-semantic-evidence-v1` contains the query, numeric scores/ranks/gaps, IDs/input hashes and a frozen page ID; it excludes structural cells, OCR text, labels, filenames and pixels. IDs/hashes are identifiers, not relevance evidence. Review every returned page even for candidates retrieved by a different condition. A top-K candidate is not a matched result.
+Use `query-evidence` for each semantic condition and page (0-based, default 0). Its `condition-semantic-evidence-v1` contains the query, frozen `query_encoding` text recipe, numeric scores/ranks/gaps, IDs/input hashes and a frozen page ID; it excludes structural cells, OCR text, labels, filenames and pixels. IDs/hashes are identifiers, not relevance evidence. Review every returned page even for candidates retrieved by a different condition. A top-K candidate is not a matched result.
+
+New OR snapshots freeze a `query_encodings` map keyed by canonical semantic condition ID. Historical raw-query snapshots may omit this map; do not manufacture preparation metadata for them. Recipe identity is part of `page_id` and final validation, so edited recipes cannot reuse old decisions. Safe summaries/evidence expose text preparation without permitting access to the private matrix. Reports show actual encoded text. Finalization and display perform no additional encoding.
 
 Write only explicit page decisions:
 
@@ -134,7 +145,7 @@ The pool is the union of structured matches and semantic candidates within the s
 3. Only the identical matched-condition ID set compares its equal-weight mean (`pattern_score`), with stable ties. Different ID sets with the same match count interleave using the frozen seed while preserving each set's order. Cross-pattern score comparisons and raw-score mixing are invalid.
 4. Limits/cursors apply only after this full ranking; `result_rank` is global, never reset per page.
 
-`show-query-results` accepts finalized snapshots only, revalidates current selected sources without re-encoding, defaults to 100 rows (1–1000), and returns `condition-search-page-v1`. Follow opaque `next_cursor` with the same saved file. Page fields include conditions, aliases, scope, `scope_total`, `candidate_count`, final `total`, per-row matched IDs/count, pattern score and per-condition raw/normalized scores.
+`show-query-results` accepts finalized snapshots only, revalidates current selected sources without re-encoding, defaults to 100 rows (1–1000), and returns `condition-search-page-v1`. Follow opaque `next_cursor` with the same saved file. Page fields include conditions, aliases, `query_encodings`, scope, `scope_total`, `candidate_count`, final `total`, per-row matched IDs/count, pattern score and per-condition raw/normalized scores.
 
 `coverage` is **input eligibility over the captured scope**, not final outcome: semantic `not_reviewed` means eligible at query time. `evaluated_coverage` is **final matched/not_matched/unknown over the candidate pool**. `retrieval` reports semantic limits, eligible counts and unretrieved count. Partial semantic coverage and missing indexes mean no-results cannot prove that no matching photos exist.
 
@@ -159,3 +170,5 @@ These JSON/HTML exports have no selection controls or membership writes; there i
 Only schema 10 with 37 registered tables is supported: 32 ordinary, one external-content FTS5 virtual table and four explicitly registered shadows (excluding internal `sqlite_sequence`), including unchanged `virtual_folders` and `virtual_folder_photos`; v1–v9 databases are rejected unchanged with no migration.
 
 No real-model performance, retrieval quality, latency, memory or disconnected-runtime claim follows from synthetic tests or authorization alone.
+
+The fixed direct-English query recipe was selected in a separately authorized comparison on 101 photos and six concepts using independent local SegFormer proxy labels, not human ground truth; user labels were unavailable. The measured proxy result does not establish arbitrary-query translation quality, which was not tested, or general retrieval accuracy. It does not authorize another photo trial.

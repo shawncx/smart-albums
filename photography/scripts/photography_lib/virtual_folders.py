@@ -165,6 +165,10 @@ def _source_summary(selected):
               "scope": saved_scope, "coverage_scope": selected["coverage_scope"],
               "coverage": {key: selected["coverage"][key] for key in (
                   "ready", "missing", "stale", "invalid_input", "invalid_vector", "total")}}
+    if "query_encoding" in selected:
+        from .semantic_query import validate_query_plan
+
+        source["query_encoding"] = validate_query_plan(selected["query_encoding"])
     selection = {key: selected["selection"][key] for key in (
         "method", "candidate_count", "selected_count", "not_selected_count", "photo_ids",
         "scope", "automatic_classification")}

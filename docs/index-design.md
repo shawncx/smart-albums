@@ -173,7 +173,19 @@ The inference resize does not preserve aspect ratio; **the SQLite preview does**
 
 Semantic fields, fixed weights/revision/file hashes, processor/tokenizer behavior, feature extraction, normalization, dimensions and runtime/backend/dtype enter the immutable profile fingerprint. Cache paths do not. The richer contract may change a profile ID relative to v7 even with identical weight bytes; matching model names/dimensions never prove compatibility.
 
-The official paired text encoder maps queries into the same space. Direct text, no translation/retrieval prefixes, 64 tokens including EOS, no added BOS, fixed right padding; overlong queries are rejected. Query vectors are transient: neither image result rows nor a new query-vector table stores them.
+The official paired text encoder maps prepared prompts into the same space. Its tokenizer contract remains 64 tokens including EOS per prompt, no added BOS and fixed right padding; `QUERY_TOO_LONG` rejects overflow without truncation. Query vectors are transient: neither image result rows nor a new query-vector table stores them.
+
+### Fixed query-side visual intent
+
+The host agent uses **text only** to extract English visual intent, retaining the user's original natural-language request in `query` and supplying `--visual-query` for plain search or optional `visual_query` in a semantic condition. Preserve all scene, actions, colors, negation and count constraints, removing search verbs without adding restrictions. For “搜索带有天空的图片”, the visual intent is `sky`, not an added blue, clear, dominant or outdoor requirement. If faithful translation is uncertain, clarify rather than replace the request with guessed keywords. Never translate literal metadata or OCR searches; `--visual-query` is rejected in metadata mode.
+
+```text
+management search "搜索带有天空的图片" --mode semantic --visual-query "sky"
+```
+
+Python does not translate. Direct already-English visual input may omit the flag; an unprepared non-Latin request fails with `VISUAL_QUERY_REQUIRED`, not a silent English fallback. `semantic_query` owns one fixed recipe, `english-visual-intent-v1`, shared by both semantic entry points: encode the NFC-normalized English visual phrase directly, with no prefix, caption template or ensemble. The frozen recipe has `prompts: [visual_query]` and `weights: [1.0]`. It exposes no selectable strategy versions or arbitrary caller prompts/weights. The recipe's actual encoded text is traceable; this is not itself evidence of improved retrieval quality.
+
+This query-side policy is separate from image profile identity: the profile, pinned checkpoint, 768-dimensional vectors and schema 10 remain unchanged, and no image reindexing is required. `query_encoding` freezes `strategy`, original `query`, English `visual_query`, actual `prompts` and `weights`. `show-results` and search-selected folder-add provenance preserve this recipe; reports show the user the actual encoded text. There is exactly one text encoder call per unique semantic condition with eligible vectors (`model_calls: 1` for plain search), otherwise zero. The prompt must satisfy the unchanged token limit; finalization and showing perform no additional encoding.
 
 ### Machine-local setup
 
@@ -259,7 +271,7 @@ Metadata search uses NFC/casefold literal substrings in photo filenames and reco
 
 `management photos` and both search modes accept repeatable `--folder-id` and `--folder-match union|intersection`, required for multiple distinct IDs. Duplicates of one ID are one folder. No IDs means the entire album; unknown folders are errors, never fallback; empty folders/intersections remain empty. Filter scope before vector inspection, ranking and top-K, deduplicating unions. Counts, coverage, pagination and gaps describe that scope. Metadata `album_total` is the actual whole count, separate from `scope_total` and query-match counts.
 
-Semantic search takes a consistent snapshot of scoped saved input metadata/current vectors in one selected profile. Invalid/stale/absent vectors are excluded. Empty candidates return without model loading, but still require a valid explicit/configured profile; otherwise the query is encoded once and exactly cosine-ranked, ties by photo ID. Default top-K 10, range 1–1000; `--after` is rejected. Search neither reads originals, repairs paths, writes DB state, regenerates photo vectors, changes defaults nor silently changes modes.
+Semantic search takes a consistent snapshot of scoped saved input metadata/current vectors in one selected profile. Invalid/stale/absent vectors are excluded. Empty candidates return without model loading, but still require a valid explicit/configured profile; otherwise the direct English visual phrase is encoded once and exactly cosine-ranked, ties by photo ID. The reported text `model_calls` counts actual encoder invocations. Default top-K 10, range 1–1000; `--after` is rejected. Search neither reads originals, repairs paths, writes DB state, regenerates photo vectors, changes defaults nor silently changes modes.
 
 Search checks vector integrity and saved input metadata, not every preview JPEG. Plan/execute and preview rendering validate the bytes they use. Similarity is not probability, a calibrated threshold or guaranteed logical filtering.
 
@@ -275,7 +287,9 @@ The separate `management query --query-file <query.json> --output <private-snaps
 
 Supported kinds are semantic, object_count, ocr_contains, color_fraction, subject_position, scene and has_near_duplicate. Discover actual profiles/taxonomies with `index profiles --component <component>`. Defaults resolve once; no automatic configure/index/image inference/downloads. OCR uses normalized literal `INSTR` for 1–2 characters and trigram candidates plus literal confirmation for 3+, not query-language interpolation. Counts require complete saved detections and a threshold no lower than the saved floor; incomplete/missing subject evidence is unknown. Scene/color/thirds rules are explicit. Duplicate lookup uses saved exact SHA-256 or same-profile dHash64 Hamming, not pHash, and does not persist comparison jobs or create dense N×N matrices.
 
-`condition-search-snapshot-v1` is a private, digest-bound export containing the matrix, frozen random seed, profiles, source identities, historical scope and ranking metadata. `query` prints only safe `condition-query-summary-v1` and the output path, never the matrix. The agent must not read the private snapshot file or OCR/scene/feature details for semantic judgment; only numeric `condition-semantic-evidence-v1` via `query-evidence` is permitted. Full `condition-decisions-v1` matched-ID pages, including explicit empty selections, are required before final counts/ranking. Top-K is not matched. Queries with no reviewable semantic cells finalize immediately. Finalization makes zero model calls and retains historical `query_model_calls`.
+`condition-search-snapshot-v1` is a private, digest-bound export containing the matrix, frozen random seed, profiles, source identities, historical scope and ranking metadata. `query` prints only safe `condition-query-summary-v1` and the output path, never the matrix. The agent must not read the private snapshot file or OCR/scene/feature details for semantic judgment; only the text recipe and numeric `condition-semantic-evidence-v1` via `query-evidence` are permitted. Full `condition-decisions-v1` matched-ID pages, including explicit empty selections, are required before final counts/ranking. Top-K is not matched. Queries with no reviewable semantic cells finalize immediately. Finalization makes zero model calls and retains historical `query_model_calls`.
+
+Semantic duplicate identity uses the prepared visual phrase/profile rather than original request wording, excluding `id` and `scoring` under existing rules. NFC normalization applies both with explicit `visual_query` and to direct English input. Different originals with the same prepared phrase deduplicate once. Keep one logical semantic condition per intent: paraphrases must not increase `matched_count`. New OR snapshots freeze `query_encodings` by canonical semantic condition ID; historical raw-query snapshots may omit this map. A semantic evidence page exposes only its `query_encoding` text recipe, numbers and record identities, never OCR/labels/pixels. Recipe identity binds `page_id` and final validation; changing preparation cannot reuse old page decisions. Finalized pages/reports preserve the map and show actual encoded text without re-encoding.
 
 OR results require one unique matched condition. Unknown is not a negative. Match count ranks first; exact matched normalized scores are 1, graded scores are direction-aware matched-population average-rank percentiles (tie averages, N=1/all equal = 1). Only identical matched-ID sets compare equal-weight means; different patterns at the same count use frozen-seed random interleaving preserving their internal order. No cross-pattern score comparison, top-level AND or RRF. Pagination follows complete ranking and preserves global ranks.
 
@@ -297,6 +311,21 @@ Dependency installation, model setup, real-photo trials and exact-plan inference
 
 ## 10. Pending validation and stage two
 
+### Query recipe benchmark
+
+The final shipping recipe is direct English visual intent (`english-visual-intent-v1`), selected from a separately authorized, preregistered comparison of **8 strategies, 6 concepts and 101 provided photos**. Independent local **SegFormer proxy labels, not human ground truth**, supplied relevance targets because user labels were unavailable. Development/holdout assignment was preregistered by content hash; the preregistered selection and sensitivity gates passed. Experimental alternatives remain evaluation-only, not runtime options.
+
+Average precision (AP) against these proxy targets:
+
+| Metric | Development: original query → visual intent | Holdout: original query → visual intent |
+| --- | --- | --- |
+| Sky AP | 0.8452 → 0.8811 | 0.7431 → 0.8998 |
+| Six-concept macro AP | 0.7376 → 0.9034 | 0.5694 → 0.8031 |
+
+These are retrieval results for the tested concepts and proxy definition, not human-verified matches, general retrieval quality or validation of embedding-only display decisions. Arbitrary-query translation quality was not tested. They do not establish cross-host support, performance or new authorization to process photos. Only the single direct phrase is shipped: no prefix, caption template, ensemble or user-selectable strategy.
+
+### Other validation and pending work
+
 Stage-one regression and authorized synthetic integration have passed; see [validation status](TODO.md). The isolated vision suite covers bilingual/EXIF OCR and blank-image YOLOX smoke. A separate three-photo run persisted all six components, prepared 16 scene text prompts using existing SigLIP weights, compared exact/perceptual fingerprints and reopened 18 ready results from a backup with originals offline. Approximately 35.4 MB of new assets were prepared. Ordinary YOLOX use remains license-gated. These checks do not grant real-photo authorization or establish unmeasured quality, performance, cross-host support or OS-level network isolation.
 
 Future separately authorized evaluation should verify download reuse/recovery and actual offline execution, start with non-sensitive images, then use explicitly selected representative photos. Assess paired Chinese/English queries, difficult combinations/no-match cases, and separately measure load/image/query/ranking time and memory.
@@ -304,7 +333,7 @@ Future separately authorized evaluation should verify download reuse/recovery an
 Mandatory follow-ups in [TODO](TODO.md):
 
 - **NaFlex:** new profile/input budget and quality/resource comparison, never in-place vector replacement.
-- **Stage 2 OR search:** implemented as above; targeted integration checks have passed. OCR/field queries and combined ranking reuse persisted stage-one evidence; current metadata/semantic behavior is unchanged. Real-photo quality and larger deployment-scale performance require separate evaluation.
+- **Stage 2 OR search:** implemented as above; targeted integration checks have passed. OCR/field queries and combined ranking reuse persisted stage-one evidence; metadata/semantic modes and defaults remain unchanged. Real-photo quality and larger deployment-scale performance require separate evaluation.
 - **Technical parameters:** focus/exposure analysis remains future index work with independent versioned inputs/results and authorization. No empty `technical_*` tables or fake results; preview blur is not original focus quality, and missing data means unknown.
 - **Embedding ONNX/quantization:** separate runtime/vector identities and measured numeric, quality and resource validation, not mixing same-dimensional vectors across profiles. The OCR/objects ONNX workers do not change the embedding backend.
 

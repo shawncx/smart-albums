@@ -108,6 +108,7 @@ def condition_report(page, output, *, config, store):
                "页面仅供用户查看，不向 agent 提供图片；没有选择控件、表单、脚本或后端，不修改相册或索引。</p>")
     for label, key in (
             ("冻结条件", "conditions"), ("重复条件别名", "aliases"), ("历史查询范围", "scope"),
+            ("实际使用的文字查询", "query_encodings"),
             ("输入资格覆盖率（整个查询范围）", "coverage"), ("最终评估覆盖率（候选池）", "evaluated_coverage"),
             ("候选上限与部分覆盖", "retrieval"), ("冻结随机种子", "random_seed")):
         header += "<h2>" + label + "</h2><pre>" + _json(page.get(key)) + "</pre>"

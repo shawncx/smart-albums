@@ -130,6 +130,8 @@ class ManagementTests(unittest.TestCase):
 
     def search(self, query="街上的人", **kwargs):
         kwargs.setdefault("encoder", FakeEncoder(self.profile))
+        if query == "街上的人":
+            kwargs.setdefault("visual_query", "people on a street")
         return management.semantic_search(query, store=self.store, config=self.config, **kwargs)
 
     def assert_error(self, code, function, *args, **kwargs):
@@ -264,7 +266,7 @@ class ManagementTests(unittest.TestCase):
         encoder = FakeEncoder(self.profile, on_encode=lambda: self.assertFalse(self.store.db.in_transaction))
         result = self.search(encoder=encoder)
         self.assertEqual(result["limit"], 10)
-        self.assertEqual(encoder.queries, ["街上的人"])
+        self.assertEqual(encoder.queries, ["people on a street"])
         self.assertEqual(result["model_calls"], 1)
         self.assertEqual(result["image_model_calls"], 0)
         self.assertEqual(result["component"], "image_embedding")
@@ -285,6 +287,34 @@ class ManagementTests(unittest.TestCase):
         self.assertEqual([item["candidate_rank"] for item in result["results"]], [1, 2, 3, 4])
         self.assertAlmostEqual(result["results"][2]["score_gap_from_best"], .4, places=6)
         self.assertIsNone(result["results"][-1]["score_gap_to_next"])
+
+    def test_fixed_visual_query_keeps_original_text_and_recipe_after_selection(self):
+        self.configure()
+        self.seed(self.ids[0])
+        encoder = FakeEncoder(self.profile)
+        original = "搜索带有天空的图片"
+        snapshot = management.semantic_search(original, store=self.store, encoder=encoder, visual_query="sky")
+        self.assertEqual(snapshot["query"], original)
+        self.assertEqual(snapshot["query_encoding"]["visual_query"], "sky")
+        self.assertEqual(snapshot["query_encoding"]["prompts"], encoder.queries)
+        self.assertEqual(snapshot["model_calls"], len(encoder.queries))
+        selected = management.select_search_results(snapshot, [self.ids[0]], store=self.store)
+        self.assertEqual(selected["query_encoding"], snapshot["query_encoding"])
+        self.assertEqual(selected["model_calls"], 0)
+        malformed = deepcopy(snapshot)
+        malformed["query_encoding"]["visual_query"] = "cloudless blue sky"
+        self.assert_error("INVALID_ARGUMENT", management.select_search_results, malformed, [], store=self.store)
+
+    def test_visual_query_cli_does_not_rewrite_literal_metadata(self):
+        self.configure()
+        self.seed(self.ids[0])
+        self.assert_error("INVALID_ARGUMENT", self.command, "search", "sky", "--mode", "metadata", "--visual-query", "sky")
+        encoder = FakeEncoder(self.profile)
+        with patch("photography_lib.siglip_embedding.SiglipEncoder", return_value=encoder):
+            result = self.command("search", "搜索带有天空的图片", "--mode", "semantic", "--visual-query", "sky")
+        self.assertEqual(result["query_encoding"]["visual_query"], "sky")
+        self.assertEqual(encoder.queries, result["query_encoding"]["prompts"])
+        self.assert_error("VISUAL_QUERY_REQUIRED", self.command, "search", "搜索天空", "--mode", "semantic")
 
     def test_show_results_is_numeric_only_preserves_ranking_and_does_not_search(self):
         self.configure()
@@ -577,7 +607,7 @@ class ManagementTests(unittest.TestCase):
         self.assertAlmostEqual(result["results"][0]["score_gap_to_next"], .6, places=6)
         selected = management.select_search_results(result, self.ids[1:2], store=self.store)
         self.assertEqual(selected["results"], result["results"])
-        self.assertEqual(encoder.queries, ["街上的人"])
+        self.assertEqual(encoder.queries, ["people on a street"])
         self.assertEqual(self.store.db.total_changes, changes)
         for forbidden in ("metadata", "filename", "thumbnail", "virtual_folders"):
             self.assertNotIn(forbidden, result["results"][0])

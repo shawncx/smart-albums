@@ -81,6 +81,7 @@ def add_commands(root_subparsers):
     _view_options(single, page=False)
     search = actions.add_parser("search", help="Literal filename/path matching or exact image-embedding retrieval.")
     search.add_argument("query")
+    search.add_argument("--visual-query", help="English visual intent prepared from the user's request; semantic mode only.")
     search.add_argument("--mode", choices=("metadata", "semantic"), required=True)
     _view_options(search, page=False)
     _scope_options(search)
@@ -198,6 +199,8 @@ def command(args, store, config):
         raise PhotographyError("INVALID_ARGUMENT", "Unknown management operation.")
     if action == "search" and args.mode == "semantic" and args.after is not None:
         raise PhotographyError("INVALID_ARGUMENT", "Semantic search does not accept --after.")
+    if action == "search" and args.mode != "semantic" and args.visual_query is not None:
+        raise PhotographyError("INVALID_ARGUMENT", "--visual-query applies only to semantic search, never literal metadata.")
 
     # Reject every unsafe target before query encoding, preview decoding or any export writes.
     output = prepare_export(args.output, config, store, (".json",)) if args.output else None
@@ -220,6 +223,7 @@ def command(args, store, config):
                                             after=args.after if args.after is not None else "")
     else:
         result = management.semantic_search(args.query, **profile, **scope, config=config,
+                                            visual_query=args.visual_query,
                                             limit=args.limit if args.limit is not None else 10)
     if html_output:
         from .management_report import management_report

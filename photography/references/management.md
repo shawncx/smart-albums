@@ -22,7 +22,7 @@ management open
 management photos [--limit N] [--after <photo-id>]
 management photo <photo-id>
 management search "<query>" --mode metadata [--limit N] [--after <photo-id>]
-management search "<query>" --mode semantic [--limit N]
+management search "<query>" --mode semantic [--visual-query "<English visual intent>"] [--limit N]
 management original <photo-id>
 management relink <photo-id> --path <absolute-original-file>
 management backup --output <new-backup.sqlite>
@@ -49,7 +49,9 @@ CLI JSON is returned without `--output`. Export paths use `html_output` and `out
 
 `show-results` uses the profile captured by its input snapshot; it does not accept a profile override or perform a new search. It accepts only its listed export options and an explicit ID-array file, including an empty array.
 
-Condition commands also open the album read-only and never perform DDL/default writes, image inference, downloads or original reads. `query` requires a separate `.json` private snapshot and prints only a safe summary. The agent must not read the private snapshot file/feature matrix to judge semantic relevance. Use numeric-only `query-evidence` (page default 0), then all explicit `condition-decisions-v1` matched-ID pages; empty per-page selections are valid, missing pages are not. Finalization reports `model_calls: 0`, retaining historical snapshot `query_model_calls`. A query without reviewable semantic cells already finalizes automatically.
+Condition commands also open the album read-only and never perform DDL/default writes, image inference, downloads or original reads. `query` requires a separate `.json` private snapshot and prints only a safe summary. The agent must not read the private snapshot file/feature matrix to judge semantic relevance. Use text-recipe/numeric-only `query-evidence` (page default 0), then all explicit `condition-decisions-v1` matched-ID pages; empty per-page selections are valid, missing pages are not. Finalization reports `model_calls: 0`, retaining historical snapshot `query_model_calls`. A query without reviewable semantic cells already finalizes automatically.
+
+Semantic conditions retain original `query` and accept optional `visual_query` with the same English visual-intent role as the plain-search flag. Different originals with the same prepared visual phrase/profile deduplicate into one logical semantic condition; predicate identity excludes `id` and `scoring` under existing rules. NFC normalization applies both with explicit `visual_query` and to direct English input. Paraphrases must not increase `matched_count`. OR snapshots freeze `query_encodings` by canonical semantic condition ID; historical raw-query snapshots may omit it. Evidence pages expose only the condition's `query_encoding` text recipe and numbers/identities, never OCR, labels or pixels. Recipe identity binds `page_id` and final validation; finalization and display perform no additional encoding. Reports show actual encoded text.
 
 `show-query-results` validates finalized source identities, pages after ranking (default 100, 1–1000), and retains global ranks with opaque snapshot-bound cursors. Its `condition-search-page-v1` JSON can be exported together with a user-only HTML report containing exactly that page's previews. Input `coverage` describes eligibility over the scope (`not_reviewed` semantic cells mean query-time eligible); `evaluated_coverage` describes final candidate-pool outcomes. Show conditions/aliases, matched counts/ID sets, per-condition cells, normalized scores and partial semantic coverage. Reports are escaped, script/form/widget/backend-free historical views, not new original checks or current-membership queries. Never open/screenshot their images for agent review.
 
@@ -152,12 +154,15 @@ management search "été" --mode metadata
 
 Matching uses Unicode NFC normalization followed by casefold on query and filename/recorded absolute or relative path. It is a **literal substring**, not regex, SQL wildcards, album-name lookup, description search or a semantic hybrid. `%` and `_` are literal; canonically equivalent text follows the same rule.
 
+Never translate literal metadata or OCR searches. `--visual-query` is rejected in metadata mode; semantic preparation must not rewrite these literals.
+
 No model, weights, credentials or embeddings are required. A blank query is an error. No hits return an empty page without silently switching modes.
 
 ## Semantic photo search
 
 ```text
-management search "黑白的枯树" --mode semantic
+management search "搜索带有天空的图片" --mode semantic --visual-query "sky"
+management search "黑白的枯树" --mode semantic --visual-query "black and white leafless trees"
 management search "black and white leafless trees" --mode semantic --profile-id <profile-id> --limit 10
 ```
 
@@ -165,11 +170,15 @@ Search uses the explicit profile, otherwise the deliberately configured default.
 
 Image and query encoders must share the **same immutable profile**, not just dimensions/model family. The first profile is `google/siglip2-base-patch16-224`, revision `75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2`, PyTorch CPU FP32. Persisted vectors represent whole saved previews: paired `image_text_semantic` space, image modality, `stored_thumbnail` input, `whole_image` granularity, 768 dimensions. Query vectors are transient.
 
-Queries use the matching tokenizer/text feature interface directly, without translation or retired retrieval prefixes. The limit is 64 tokens including EOS; overlong queries produce `QUERY_TOO_LONG`, not silent truncation.
+The host agent uses **text only** to prepare English visual intent, keeping the user's original natural-language request in `query` and supplying `--visual-query`. Preserve all scene, actions, colors, negation and count constraints; remove search verbs, not meaning. For “搜索带有天空的图片”, use `sky` without adding blue, clear, dominant or outdoor restrictions. If faithful translation is uncertain, clarify rather than substitute guessed keywords.
+
+Python does not translate. Direct callers with already-English visual input may omit the flag; an unprepared non-Latin request fails with `VISUAL_QUERY_REQUIRED`, not a silent English fallback. Both semantic entry points use one fixed recipe, `english-visual-intent-v1`: encode the NFC-normalized English visual phrase directly, with no prefix, caption template or ensemble. The frozen recipe has `prompts: [visual_query]` and `weights: [1.0]`, without selectable versions or caller-provided prompts/weights. The prompt is limited to 64 tokens including EOS; overlong text produces `QUERY_TOO_LONG` without truncation or dropping constraints.
+
+The snapshot's `query_encoding` freezes `strategy`, original `query`, English `visual_query`, actual `prompts` and `weights`. `show-results` and search-selected folder-add provenance preserve it. Show the user the actual encoded text, not only their original request. This query-only preparation leaves the image profile, checkpoint, 768-dimensional vectors and schema 10 unchanged; no image reindexing is required. The recipe itself does not establish measured retrieval quality.
 
 A consistent saved-data snapshot supplies current photo/preview identities and vectors within the resolved folder/album scope. Invalid/stale/absent results are excluded and reported; semantic ranking checks saved input metadata and vector integrity, not original files or all preview JPEG bytes. Optional HTML rendering validates its embedded previews separately.
 
-With no eligible candidates, search returns empty results and coverage without loading a model. Otherwise it encodes the query once and ranks locally by exact cosine similarity. It never regenerates image vectors, mixes profiles, changes defaults, installs/downloads weights or falls back to a cloud service.
+With no eligible candidates, search returns empty results and coverage without loading a model, with zero text calls. Otherwise there is exactly one text encoder call per unique semantic condition with eligible vectors (`model_calls: 1` for plain search), and the resulting vector ranks locally by exact cosine similarity. It never regenerates image vectors, mixes profiles, changes defaults, installs/downloads weights or falls back to a cloud service.
 
 Semantic search defaults to top 10, accepts 1–1000 and **rejects `--after`**. Results sort by descending similarity, then photo ID. Coverage includes the **entire selected scope**, not only top-K: distinguish `ready`, `missing`, `stale`, `invalid_input` and `invalid_vector` from old task failures and source availability. Incomplete coverage must not be described as searching every photo.
 
@@ -179,16 +188,16 @@ Scores are relative similarities, not probabilities, guaranteed logical filters,
 
 ### Select what to display without sending images to the agent
 
-The Skill uses only the query and embedding-derived scores/ranks/gaps to select display IDs. It must not inspect originals, thumbnails, screenshots or image-containing HTML. No images are passed to the agent for relevance decisions. This is intentionally heuristic and may omit relevant photos or include false positives.
+The Skill uses only the query, its frozen text recipe and embedding-derived scores/ranks/gaps to select display IDs. It must not inspect originals, thumbnails, screenshots or image-containing HTML. No images are passed to the agent for relevance decisions. This is intentionally heuristic and may omit relevant photos or include false positives.
 
 ```text
-management search "有人物的照片" --mode semantic --output <candidates.json>
+management search "有人物的照片" --mode semantic --visual-query "people" --output <candidates.json>
 management show-results <candidates.json> --ids-file <selected.json> --html <results.html> --output <displayed.json>
 ```
 
 `selected.json` is an array of photo IDs from that exact snapshot. Unknown IDs, malformed candidates, another album or stale selected input/result identities are errors. Duplicates are deduplicated; original candidate order, validated saved scores, ranks and score gaps are retained verbatim, including a gap to the next candidate outside returned top-K. Gaps are not recomputed from the selected subset. The output records the source snapshot ID and selected/candidate counts. Candidates, `show-results` and reports preserve historical scope and names after folder rename/deletion or membership changes; they do not re-query current membership. It does not forward arbitrary input fields or image payloads, write the database, or call an encoder. Its selection method is `explicit_candidate_ids`, not an automatic classifier.
 
-An empty selection produces an empty report scoped to the retrieved candidates. It does not prove no match exists among photos outside top-K or without indexes. Selected JSON remains numeric/identity-only. Local HTML rendering can read matching SQLite previews and names **for the user's display**; the agent must return the file link without reading/attaching those images. Raw `search --html` remains an explicitly labeled, unfiltered diagnostic, not the default Skill flow. Input candidate/selection files cannot be overwritten by the selected-result export.
+An empty selection produces an empty report scoped to the retrieved candidates. It does not prove no match exists among photos outside top-K or without indexes. Selected JSON contains only text preparation, numbers and identities, not image evidence. Local HTML rendering can read matching SQLite previews and names **for the user's display**; the agent must return the file link without reading/attaching those images. Raw `search --html` remains an explicitly labeled, unfiltered diagnostic, not the default Skill flow. Input candidate/selection files cannot be overwritten by the selected-result export.
 
 ## Explicit original lookup and relink
 
@@ -229,3 +238,5 @@ Native POSIX publication paths have only mocked checks on Windows, not actual Li
 HTML escapes data, embeds validated previews and binds them to the snapshot's album/input identities. Changed/missing/corrupt previews display errors instead of substitute images. No original access is required. There are no selection checkboxes, membership controls, live server or retained `search-add` protocol.
 
 Claim no real-model performance, quality, memory, timing, disconnected operation or cross-host support without recorded verification; synthetic tests and authorization alone are not acceptance.
+
+The fixed query recipe was separately selected on 101 authorized photos and six concepts using independent local SegFormer proxy labels, not human ground truth; user labels were unavailable. Arbitrary-query translation quality was not tested. Do not generalize the measured proxy AP to human-verified or general retrieval accuracy, or treat that trial as authorization for another photo collection.

@@ -74,6 +74,8 @@ def management_report(snapshot, output, *, config, store):
     header += "<p>相册 UUID：" + _text(album["id"]) + "</p>"
     if "query" in snapshot:
         header += "<p>查询：" + _text(snapshot["query"]) + "</p>"
+    if "query_encoding" in snapshot:
+        header += "<details><summary>实际使用的文字查询</summary><pre>" + _json(snapshot["query_encoding"]) + "</pre></details>"
     if scope["kind"] == "virtual_folders":
         operation = "并集" if scope["match"] == "union" else "交集"
         names = "、".join(folder["name"] for folder in scope["folders"])

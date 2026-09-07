@@ -27,7 +27,7 @@ COLORS = ("black", "white", "gray", "red", "orange", "yellow", "green",
 PALETTE_RULE_VERSION = "hsv-palette-v1"
 POSITION_RULE_VERSION = "thirds-v1"
 _FIELDS = {
-    "semantic": {"query"},
+    "semantic": {"query", "visual_query"},
     "object_count": {"class_id", "operator", "value", "score_threshold"},
     "ocr_contains": {"text"},
     "color_fraction": {"color", "minimum"},
@@ -158,6 +158,11 @@ def _condition(raw, store, cache):
             ("graded",) if kind == "semantic" else ("exact",), "condition scoring")
     if kind == "semantic":
         result["query"] = _text(raw.get("query"), "Semantic query").strip()
+        if "visual_query" in raw:
+            from .semantic_query import prepare_query
+
+            visual = _text(raw["visual_query"], "English visual query")
+            result["visual_query"] = prepare_query(result["query"], visual)["visual_query"]
     elif kind == "object_count":
         result.update(class_id=_text(raw.get("class_id"), "Object class", limit=128),
                       operator=_choice(raw.get("operator"), ("eq", "ge", "le"), "count operator"),
@@ -218,7 +223,11 @@ def normalize_query(raw, *, store):
         _require(cid not in seen, "Condition IDs must be unique, even for identical predicates.")
         seen.add(cid)
         condition = _condition(item, store, cache)
-        identity = json.dumps({key: value for key, value in condition.items() if key not in ("id", "scoring")},
+        identity_fields = {key: value for key, value in condition.items() if key not in ("id", "scoring")}
+        if condition["kind"] == "semantic":
+            identity_fields["query"] = unicodedata.normalize("NFC", condition.get("visual_query", condition["query"]))
+            identity_fields.pop("visual_query", None)
+        identity = json.dumps(identity_fields,
                               sort_keys=True, ensure_ascii=False, allow_nan=False)
         if identity not in identities:
             canonical.append(condition)

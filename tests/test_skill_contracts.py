@@ -1,5 +1,6 @@
 from contextlib import closing
 from pathlib import Path
+import json
 import re
 import shlex
 import shutil
@@ -7,7 +8,9 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+from types import SimpleNamespace
 import unittest
+from unittest.mock import Mock, patch
 from urllib.parse import unquote
 
 
@@ -15,6 +18,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "photography" / "scripts"))
 
 from photography_lib.cli import parser
+from photography_lib import condition_queries, condition_ranking, semantic_query
 from photography_lib.feature_profiles import COMPONENTS
 from photography_lib.image_embedding_storage import IMAGE_EMBEDDING_SCHEMA, IMAGE_EMBEDDING_TABLES
 from photography_lib.image_feature_storage import (
@@ -23,6 +27,15 @@ from photography_lib.image_feature_storage import (
 )
 from photography_lib.sqlite_storage import SCHEMA, SCHEMA_VERSION
 from photography_lib.virtual_folder_storage import VIRTUAL_FOLDER_SCHEMA
+
+
+QUERY_GUIDES = (
+    ROOT / "README.md",
+    ROOT / "photography" / "SKILL.md",
+    ROOT / "photography" / "references" / "search.md",
+    ROOT / "photography" / "references" / "management.md",
+    ROOT / "docs" / "index-design.md",
+)
 
 
 class SkillContractTests(unittest.TestCase):
@@ -48,6 +61,172 @@ class SkillContractTests(unittest.TestCase):
                 self.assertNotIn("pip install -r photography/requirements-embedding.txt", text)
                 self.assertNotIn("intfloat/multilingual-e5-small", text)
                 self.assertNotIn("Xenova/multilingual-e5-small", text)
+
+    def test_semantic_guides_require_text_only_intent_without_literal_translation(self):
+        for document in QUERY_GUIDES:
+            text = document.read_text(encoding="utf-8")
+            with self.subTest(document=document.name):
+                for token in ("text only", "English visual intent", "query", "--visual-query",
+                              "visual_query", "scene", "actions", "colors", "negation", "count constraints",
+                              "search verbs", "sky", "blue", "clear", "dominant", "outdoor", "clarify",
+                              "Python does not translate", "VISUAL_QUERY_REQUIRED", "QUERY_TOO_LONG",
+                              "64", "EOS", "without truncation", "one fixed recipe",
+                              semantic_query.STRATEGY, "no image reindexing is required",
+                              "768", "schema 10"):
+                    self.assertIn(token, text)
+                self.assertIn("Never translate literal metadata or OCR searches", text)
+                self.assertIn("`--visual-query` is rejected in metadata mode", text)
+                self.assertRegex(text, r"(?i)already-English visual input may omit|already-English visual input[^.;\n]+may omit")
+                self.assertNotIn("Do not translate automatically", text)
+                self.assertNotIn("without automatic translation", text)
+                self.assertNotIn("without translation or retired retrieval prefixes", text)
+                self.assertNotIn("no translation/retrieval prefixes", text)
+                self.assertNotRegex(text, r"--(?:query-strategy|strategy|prompts|weights)\b")
+
+    def test_documented_semantic_commands_parse_and_keep_original_and_visual_text(self):
+        cli = parser()
+        expected = {
+            "搜索带有天空的图片": "sky",
+            "黑白的枯树": "black and white leafless trees",
+            "有人物的照片": "people",
+        }
+        observed = set()
+        values = {
+            "query": "sky", "original query": "sky", "English visual intent": "sky",
+            "output-directory": str(ROOT / "contract-only-output"),
+        }
+        for document in QUERY_GUIDES:
+            text = document.read_text(encoding="utf-8")
+            blocks = re.findall(r"```text\n(.*?)```", text, re.DOTALL)
+            commands = [line[line.index("management search "):]
+                        for block in blocks for line in block.splitlines()
+                        if "management search " in line and "--mode semantic" in line]
+            self.assertTrue(commands, document.name)
+            for command in commands:
+                for optional in (False, True):
+                    expanded = re.sub(r"\[([^\[\]]*)\]", r"\1" if optional else "", command)
+                    expanded = re.sub(r"<([^>]+)>", lambda match: values.get(match[1], match[1]), expanded)
+                    expanded = re.sub(r"\bN\b", "20", expanded)
+                    arguments = [arg[1:-1] if arg.startswith(('"', "'")) and arg[-1] == arg[0] else arg
+                                 for arg in shlex.split(expanded, posix=False)]
+                    with self.subTest(document=document.name, command=expanded):
+                        parsed = cli.parse_args(["--database", str(ROOT / "contract-only.sqlite"), *arguments])
+                        plan = semantic_query.prepare_query(parsed.query, parsed.visual_query)
+                        self.assertEqual(plan["query"], parsed.query)
+                        self.assertEqual(plan["strategy"], semantic_query.STRATEGY)
+                        self.assertEqual(semantic_query.validate_query_plan(plan), plan)
+                        if parsed.query in expected:
+                            observed.add(parsed.query)
+                            self.assertEqual(parsed.visual_query, expected[parsed.query])
+                            self.assertEqual(plan["visual_query"], expected[parsed.query])
+                        else:
+                            self.assertTrue(parsed.query.isascii())
+        self.assertEqual(observed, set(expected))
+
+    def test_query_guides_preserve_frozen_recipe_and_actual_call_accounting(self):
+        fields = set(semantic_query.prepare_query("搜索带有天空的图片", "sky"))
+        self.assertEqual(fields, {"strategy", "query", "visual_query", "prompts", "weights"})
+        for document in QUERY_GUIDES:
+            text = document.read_text(encoding="utf-8")
+            with self.subTest(document=document.name):
+                for field in fields:
+                    self.assertIn(f"`{field}`", text)
+                for token in ("query_encoding", "query_encodings", "show-results", "folder-add provenance",
+                              "actual encoded text", "historical raw-query snapshots",
+                              "page_id", "final validation", "no additional encoding",
+                              "model_calls", "zero", "eligible", "matched_count",
+                              "one logical semantic condition", "prepared visual phrase",
+                              "profile", "`id`", "`scoring`", "nfc normalization applies both",
+                              "no prefix, caption template or ensemble",
+                              "prompts: [visual_query]", "weights: [1.0]",
+                              "one text encoder call per unique semantic condition with eligible vectors"):
+                    self.assertIn(token, text.casefold())
+                self.assertNotRegex(text, r"number of prepared `prompts`|calls follow prompt count")
+
+    def test_final_shipping_recipe_encodes_only_the_visual_phrase_once(self):
+        plan = semantic_query.prepare_query("搜索带有天空的图片", "sky")
+        self.assertEqual(plan, {
+            "strategy": "english-visual-intent-v1", "query": "搜索带有天空的图片",
+            "visual_query": "sky", "prompts": ["sky"], "weights": [1.0],
+        })
+        encoder = Mock()
+        encoder.profile.return_value = {"dimensions": 3}
+        encoder.encode_text.return_value = SimpleNamespace(vector=[0.6, 0.8, 0.0], token_count=2)
+        encoded = semantic_query.encode_query(plan, encoder)
+        encoder.encode_text.assert_called_once_with("sky")
+        self.assertEqual(encoded.vector, [0.6, 0.8, 0.0])
+        self.assertEqual(encoded.model_calls, 1)
+        self.assertEqual(encoded.token_counts, [2])
+
+    def test_benchmark_guides_limit_claims_to_proxy_labels_and_tested_queries(self):
+        for document in QUERY_GUIDES:
+            text = document.read_text(encoding="utf-8")
+            with self.subTest(document=document.name):
+                for term in ("101", "SegFormer proxy labels, not human ground truth",
+                             "user labels were unavailable", "arbitrary-query translation quality",
+                             "not tested"):
+                    self.assertIn(term.casefold(), text.casefold())
+        for document in (ROOT / "README.md", ROOT / "docs" / "index-design.md"):
+            text = document.read_text(encoding="utf-8")
+            with self.subTest(document=document.name):
+                for term in ("8 strategies, 6 concepts and 101 provided photos", "preregistered",
+                             "holdout", "content", "sensitivity gates passed",
+                             "0.5694", "0.8031", "0.7431", "0.8998"):
+                    self.assertIn(term.casefold(), text.casefold())
+        design = (ROOT / "docs" / "index-design.md").read_text(encoding="utf-8")
+        for term in ("0.8452", "0.8811", "0.7376", "0.9034", "not runtime options",
+                     "validation of embedding-only display decisions"):
+            self.assertIn(term, design)
+
+    def test_documented_semantic_condition_aliases_do_not_add_matches(self):
+        text = (ROOT / "photography" / "references" / "search.md").read_text(encoding="utf-8")
+        examples = [json.loads(block) for block in re.findall(r"```json\n(.*?)```", text, re.DOTALL)]
+        query = next(example for example in examples if example.get("schema") == condition_queries.SCHEMA)
+        condition = next(item for item in query["conditions"] if item["kind"] == "semantic")
+        self.assertEqual(condition["query"], "搜索带有天空的图片")
+        self.assertEqual(condition["visual_query"], "sky")
+        original = {**condition, "profile_id": "embedding-contract"}
+        alias = {**original, "id": "alias", "query": "有天空的照片"}
+        alias.pop("scoring")
+        direct = {**original, "id": "direct", "query": original["visual_query"]}
+        direct.pop("visual_query")
+        with patch.object(condition_queries, "_profile", return_value=("embedding-contract", {})):
+            normalized = condition_queries.normalize_query(
+                {**query, "conditions": [original, alias, direct]}, store=None)
+        conditions = normalized["query"]["conditions"]
+        self.assertEqual(conditions, [original])
+        self.assertEqual(normalized["aliases"],
+                         {original["id"]: original["id"], "alias": original["id"], "direct": original["id"]})
+        plan = semantic_query.prepare_query(original["query"], original["visual_query"])
+        self.assertEqual(plan["prompts"], ["sky"])
+        self.assertEqual(plan["weights"], [1.0])
+        row = {"photo_id": "synthetic-contract-id", "conditions": {original["id"]: {
+            "status": "matched", "raw_score": 0.5, **condition_queries.descriptor(original),
+            "sources": [], "evidence": {}, "reason": None,
+        }}}
+        ranked = condition_ranking.rank_results([row], conditions, "contract-seed")
+        self.assertEqual(ranked["results"][0]["matched_count"], 1)
+        self.assertEqual(ranked["results"][0]["matched_condition_ids"], [original["id"]])
+
+    def test_visual_condition_identity_normalizes_nfc_for_both_routes(self):
+        explicit = {
+            "id": "explicit", "kind": "semantic", "query": "咖啡馆露台",
+            "visual_query": "café terrace", "profile_id": "embedding-contract", "scoring": "graded",
+        }
+        direct = {"id": "direct", "kind": "semantic", "query": "cafe\u0301 terrace",
+                  "profile_id": "embedding-contract", "scoring": "graded"}
+        alias = {**explicit, "id": "alias", "visual_query": "cafe\u0301 terrace"}
+        for conditions in ([explicit, direct, alias], [direct, alias, explicit]):
+            with self.subTest(first=conditions[0]["id"]):
+                with patch.object(condition_queries, "_profile", return_value=("embedding-contract", {})):
+                    normalized = condition_queries.normalize_query({"conditions": conditions}, store=None)
+                canonical = normalized["query"]["conditions"]
+                self.assertEqual(len(canonical), 1)
+                self.assertEqual(canonical[0]["query"], conditions[0]["query"])
+                self.assertEqual(normalized["aliases"],
+                                 {item["id"]: conditions[0]["id"] for item in conditions})
+                plan = semantic_query.prepare_query(canonical[0]["query"], canonical[0].get("visual_query"))
+                self.assertEqual(plan["prompts"], ["café terrace"])
 
     def assert_local_markdown_links(self, documents, *, bundle=None):
         for document in documents:

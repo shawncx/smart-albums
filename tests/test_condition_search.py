@@ -228,6 +228,45 @@ class ConditionSearchTests(unittest.TestCase):
         self.assertEqual(final["results"][0]["matched_count"], 1)
         self.assertEqual(self.encoder.calls, ["beach"])
 
+    def test_visual_intent_is_one_condition_and_visible_in_numeric_evidence(self):
+        self.seed_vectors()
+        snapshot = self.query([
+            {"id": "A", "kind": "semantic", "query": "搜索带有天空的图片", "visual_query": "sky"},
+            {"id": "B", "kind": "semantic", "query": "查找能看到天空的照片", "visual_query": "sky"},
+        ])
+        self.assertEqual(snapshot["aliases"], {"A": "A", "B": "A"})
+        self.assertEqual(len(snapshot["query"]["conditions"]), 1)
+        evidence = condition_search.semantic_evidence(snapshot, "A", store=self.store)
+        self.assertEqual(evidence["query"], "搜索带有天空的图片")
+        self.assertEqual(evidence["query_encoding"]["visual_query"], "sky")
+        self.assertEqual(self.encoder.calls, evidence["query_encoding"]["prompts"])
+        final = condition_search.finalize_query(snapshot, self.decisions(snapshot, {"A": ["a"]}), store=self.store)
+        page = condition_search.show_results(final, store=self.store)
+        self.assertEqual(page["results"][0]["matched_count"], 1)
+        self.assertEqual(page["query_encodings"]["A"], evidence["query_encoding"])
+        self.assertEqual(len(self.encoder.calls), snapshot["query_model_calls"])
+        bad = deepcopy(snapshot)
+        bad["query_encodings"]["A"]["prompts"] = ["an unrelated scene"]
+        condition_search._seal(bad)
+        with self.assertRaises(PhotographyError):
+            condition_search.finalize_query(bad, self.decisions(snapshot, {}), store=self.store)
+
+    def test_visual_query_is_not_an_extra_structured_condition_option(self):
+        with self.assertRaises(PhotographyError):
+            self.query([{"id": "A", "kind": "ocr_contains", "text": "literal", "visual_query": "translation"}])
+        with self.assertRaises(PhotographyError):
+            self.query([{"id": "A", "kind": "semantic", "query": "天空", "visual_query": None}])
+
+    def test_direct_and_explicit_unicode_equivalent_visual_intents_count_once(self):
+        self.seed_vectors()
+        snapshot = self.query([
+            {"id": "A", "kind": "semantic", "query": "a cafe\u0301"},
+            {"id": "B", "kind": "semantic", "query": "寻找咖啡馆", "visual_query": "a caf\u00e9"},
+        ])
+        self.assertEqual(snapshot["aliases"], {"A": "A", "B": "A"})
+        self.assertEqual(self.encoder.calls, ["a caf\u00e9"])
+        final = condition_search.finalize_query(snapshot, self.decisions(snapshot, {"A": ["a"]}), store=self.store)
+        self.assertEqual(final["results"][0]["matched_count"], 1)
     def test_structured_or_random_interleaving_preserves_same_pattern_score_order_and_paging(self):
         for pid, blue, count, text in (("a", .9, 2, ""), ("b", .4, 2, ""), ("c", .7, 0, "hit")):
             self.color(pid, blue)

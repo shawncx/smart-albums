@@ -7,18 +7,20 @@ import math
 
 from .config import PhotographyError
 from .feature_profiles import (
-    _fields, _integer, _json, _objects, _require,
+    _fields, _integer, _json, _objects, _PROVIDERS, _require,
     default_profile, profile_identity, validate_payload,
 )
 from .fingerprints import fingerprint
 from .image_vectors import validate_vector
 
 
-def _profile(profile, component):
+def _profile(profile, component, *, executable=True):
     profile_identity(profile)
     if profile["component"] != component:
         raise PhotographyError("FEATURE_PROFILE_INVALID", "Algorithm and profile component disagree.")
-    if component in ("color", "perceptual_hash"):
+    if executable and profile["provider"] != _PROVIDERS[component]:
+        raise PhotographyError("FEATURE_PROVIDER_UNSUPPORTED", "This algorithm cannot execute the declared feature provider.")
+    if executable and component in ("color", "perceptual_hash"):
         from PIL import __version__
 
         if profile["runtime"].get("packages", {}).get("Pillow") != __version__:
@@ -162,7 +164,7 @@ def compute_composition(objects_payload, profile):
 
 def validate_scene_prototypes(profile, prototypes, *, dimensions=None):
     """Validate portable catalog records, preserving their declared ordering."""
-    p = _profile(profile, "scene")
+    p = _profile(profile, "scene", executable=False)
     try:
         _require(isinstance(prototypes, list) and len(prototypes) == len(p["catalog"]),
                  "Prototypes must cover the entire scene catalog.")

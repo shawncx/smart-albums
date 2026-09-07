@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import struct
+import subprocess
 import sys
 from types import SimpleNamespace
 import unittest
@@ -20,7 +21,7 @@ sys.path.insert(0, str(PROJECT / "photography" / "scripts"))
 
 from photography_lib.config import Config, PhotographyError
 from photography_lib import feature_models as models
-from photography_lib.feature_profiles import default_profile, profile_identity, validate_payload
+from photography_lib.feature_profiles import OCR_IMAGE_DECODE, default_profile, profile_identity, validate_payload
 from photography_lib.feature_vision import VisionProvider
 from photography_lib import feature_worker as worker
 
@@ -99,6 +100,29 @@ class FeatureModelTests(unittest.TestCase):
         with self.assertRaises(PhotographyError):
             models.validate_provider_profile(bad)
 
+    def test_ocr_decoder_version_preserves_old_evidence_without_reexecuting_it(self):
+        current = ready_profile("ocr")
+        self.assertEqual(current["provider"], "rapidocr-3.9.2-onnx-v2")
+        self.assertEqual(current["parameters"]["decode"], OCR_IMAGE_DECODE)
+        historical = copy.deepcopy(current)
+        historical["provider"] = "rapidocr-3.9.2-onnx-v1"
+        historical["parameters"].pop("decode")
+        self.assertNotEqual(profile_identity(current), profile_identity(historical))
+        payload = {"width": 1, "height": 1, "complete": True, "text": "",
+                   "normalized_text": "", "blocks": []}
+        self.assertEqual(validate_payload(historical, payload), payload)
+        for profile in (historical, {**current, "provider": "unknown-provider-v99"},
+                        {**current, "provider": "yolox-nano-onnx-v1"}):
+            with self.subTest(provider=profile["provider"]):
+                for construct in (lambda: VisionProvider(profile, config=self.config),
+                                  lambda: worker.Engine(profile, {})):
+                    with self.assertRaises(PhotographyError) as caught:
+                        construct()
+                    self.assertEqual(caught.exception.code, "FEATURE_MODEL_INVALID")
+        current["parameters"].pop("decode")
+        with self.assertRaises(PhotographyError):
+            models.validate_provider_profile(current)
+
     def test_objects_license_gate_precedes_runtime_or_network(self):
         with patch.dict(os.environ, {}, clear=True), patch.object(models, "probe_runtime") as probe:
             with self.assertRaises(PhotographyError) as caught:
@@ -135,7 +159,7 @@ class FeatureModelTests(unittest.TestCase):
             with self.assertRaises(PhotographyError):
                 models.setup_component("ocr", config=self.config, python_path=sys.executable)
             self.assertFalse(directory.exists())
-            self.assertEqual(list(directory.parent.iterdir()), [])
+            self.assertEqual(list(directory.parent.iterdir()), [directory.parent / ".setup.lock"])
 
     def test_existing_foreign_directory_is_never_overwritten(self):
         content, assets = self._fixtures()
@@ -181,11 +205,111 @@ class FeatureModelTests(unittest.TestCase):
         directory = models.component_directory("ocr", config=self.config)
         directory.parent.mkdir(parents=True)
         lock = directory.parent / ".setup.lock"
-        lock.write_text("not owned")
-        with patch.object(models, "probe_runtime", return_value=FAKE_RUNTIME), self.assertRaises(PhotographyError) as caught:
-            models.setup_component("ocr", config=self.config)
-        self.assertEqual(caught.exception.code, "FEATURE_SETUP_BUSY")
-        self.assertEqual(lock.read_text(), "not owned")
+        for contents in ("not owned", str(os.getpid()), ""):
+            lock.write_text(contents)
+            with self.subTest(contents=contents), \
+                    patch.object(models, "probe_runtime", return_value=FAKE_RUNTIME), \
+                    patch.object(models, "_download") as download, \
+                    self.assertRaises(PhotographyError) as caught:
+                models.setup_component("ocr", config=self.config)
+            self.assertEqual(caught.exception.code, "FEATURE_SETUP_BUSY")
+            download.assert_not_called()
+            self.assertEqual(lock.read_text(), contents)
+
+    def _lock_subprocess(self, body):
+        script = (
+            "import os, sys\nfrom pathlib import Path\n"
+            f"sys.path.insert(0, {str(PROJECT / 'photography' / 'scripts')!r})\n"
+            "from photography_lib import feature_models as models\n"
+            "from photography_lib.config import PhotographyError\n"
+            "root = Path(sys.argv[1])\n" + body
+        )
+        return subprocess.run([sys.executable, "-I", "-c", script, str(self.root)],
+                              capture_output=True, text=True, timeout=15, check=False)
+
+    def test_setup_lock_blocks_active_process_and_preserves_lock_inode(self):
+        with models._setup_lock(self.root):
+            result = self._lock_subprocess(
+                "try:\n"
+                "    with models._setup_lock(root):\n"
+                "        raise AssertionError('Active lock was bypassed')\n"
+                "except PhotographyError as exc:\n"
+                "    assert exc.code == 'FEATURE_SETUP_BUSY', exc.code\n"
+            )
+            self.assertEqual(result.returncode, 0, result.stderr)
+        lock = self.root / ".setup.lock"
+        identity, contents = lock.stat().st_ino, lock.read_bytes()
+        with models._setup_lock(self.root):
+            self.assertEqual(lock.stat().st_ino, identity)
+        self.assertEqual(lock.read_bytes(), contents)
+
+    def test_setup_lock_is_released_after_abrupt_process_exit(self):
+        result = self._lock_subprocess(
+            "with models._setup_lock(root):\n"
+            "    os._exit(17)\n"
+        )
+        self.assertEqual(result.returncode, 17, result.stderr)
+        lock = self.root / ".setup.lock"
+        identity, contents = lock.stat().st_ino, lock.read_bytes()
+        with models._setup_lock(self.root):
+            self.assertEqual(lock.stat().st_ino, identity)
+        self.assertEqual(lock.read_bytes(), contents)
+
+    def test_setup_lock_crash_before_publication_does_not_block_retry(self):
+        result = self._lock_subprocess(
+            "def crash_before_publish(fd):\n"
+            "    os._exit(19)\n"
+            "models.os.fsync = crash_before_publish\n"
+            "with models._setup_lock(root):\n"
+            "    raise AssertionError('Unexpected lock acquisition')\n"
+        )
+        self.assertEqual(result.returncode, 19, result.stderr)
+        self.assertFalse((self.root / ".setup.lock").exists())
+        abandoned = list(self.root.glob(".setup-lock-*.tmp"))
+        self.assertEqual(len(abandoned), 1)
+        with models._setup_lock(self.root):
+            pass
+        self.assertTrue((self.root / ".setup.lock").is_file())
+        self.assertTrue(abandoned[0].is_file())
+
+    def test_setup_lock_publication_failure_cleans_own_stage_and_allows_retry(self):
+        with patch("photography_lib.exports.publish_new_file", side_effect=OSError("Publication failed")), self.assertRaises(OSError):
+            with models._setup_lock(self.root):
+                self.fail("Unexpected lock acquisition")
+        self.assertEqual(list(self.root.iterdir()), [])
+        with models._setup_lock(self.root):
+            pass
+
+    def test_setup_lock_concurrent_initializers_cannot_both_enter(self):
+        from concurrent.futures import ThreadPoolExecutor
+        from queue import Queue
+        from threading import Barrier, Event
+        barrier, release, outcomes = Barrier(2), Event(), Queue()
+        from photography_lib.exports import publish_new_file
+
+        def publish(*args, **kwargs):
+            barrier.wait(timeout=10)
+            return publish_new_file(*args, **kwargs)
+
+        def contender():
+            try:
+                with models._setup_lock(self.root):
+                    outcomes.put("entered")
+                    if not release.wait(timeout=10):
+                        raise AssertionError("Lock contender was not released")
+            except PhotographyError as exc:
+                outcomes.put(exc.code)
+
+        with patch("photography_lib.exports.publish_new_file", side_effect=publish), ThreadPoolExecutor(max_workers=2) as pool:
+            futures = [pool.submit(contender) for _ in range(2)]
+            try:
+                self.assertCountEqual([outcomes.get(timeout=10) for _ in range(2)],
+                                      ["entered", "FEATURE_SETUP_BUSY"])
+            finally:
+                release.set()
+            for future in futures:
+                future.result(timeout=10)
+        self.assertEqual(list(self.root.iterdir()), [self.root / ".setup.lock"])
 
 
 FAKE_WORKER = r'''
@@ -291,6 +415,108 @@ class FeatureWorkerProtocolTests(unittest.TestCase):
         provider = self.provider()
         self.assertTrue(provider.check_ready()["ready"])
         self.assertIsNone(provider._process)
+
+
+@unittest.skipUnless(importlib.util.find_spec("numpy"), "Image decoding tests need NumPy.")
+class FeatureImageDecodeTests(unittest.TestCase):
+    def _png(self, image, **options):
+        buffer = io.BytesIO()
+        image.save(buffer, format="PNG", **options)
+        return buffer.getvalue()
+
+    def test_alpha_variants_composite_on_white_in_bgr(self):
+        from PIL import Image
+        rgba = Image.new("RGBA", (3, 1))
+        rgba.putdata([(10, 20, 30, 0), (10, 20, 30, 128), (10, 20, 30, 255)])
+        la = Image.new("LA", (3, 1))
+        la.putdata([(0, 0), (0, 128), (0, 255)])
+        palette = Image.new("P", (3, 1))
+        palette.putpalette([0, 0, 0, 255, 0, 0, 0, 255, 0] + [0] * (768 - 9))
+        palette.putdata([0, 1, 2])
+        rgb = Image.new("RGB", (2, 1))
+        rgb.putdata([(10, 20, 30), (80, 90, 100)])
+        gray = Image.new("L", (2, 1))
+        gray.putdata([50, 100])
+        cases = [
+            ("RGBA", rgba, {}, [[255, 255, 255], [142, 137, 132], [30, 20, 10]]),
+            ("LA", la, {}, [[255, 255, 255], [127, 127, 127], [0, 0, 0]]),
+            ("P-alpha", palette, {"transparency": bytes([0, 128, 255])},
+             [[255, 255, 255], [127, 127, 255], [0, 255, 0]]),
+            ("P-index", palette, {"transparency": 0}, [[255, 255, 255], [0, 0, 255], [0, 255, 0]]),
+            ("RGB-key", rgb, {"transparency": (10, 20, 30)}, [[255, 255, 255], [100, 90, 80]]),
+            ("L-key", gray, {"transparency": 50}, [[255, 255, 255], [100, 100, 100]]),
+        ]
+        for name, image, options, expected in cases:
+            with self.subTest(mode=name):
+                decoded = worker.decode_image(self._png(image, **options), 100)
+                self.assertEqual(decoded.tolist(), [expected])
+                self.assertTrue(decoded.flags.c_contiguous)
+                self.assertEqual(str(decoded.dtype), "uint8")
+
+    def test_exif_rotates_alpha_and_opaque_pixels_together(self):
+        from PIL import Image
+        image = Image.new("RGBA", (2, 1))
+        image.putdata([(0, 0, 0, 0), (255, 0, 0, 255)])
+        exif = Image.Exif()
+        exif[274] = 6
+        data = self._png(image, exif=exif)
+        self.assertEqual(worker.decode_image(data, 100).tolist(), [[[255, 255, 255]], [[0, 0, 255]]])
+        self.assertEqual(worker.decode_image(data, 100, recipe=worker.LEGACY_IMAGE_DECODE).tolist(),
+                         [[[0, 0, 0]], [[0, 0, 255]]])
+
+    def test_icc_conversion_precedes_alpha_and_invalid_icc_fails_explicitly(self):
+        from PIL import Image, ImageCms
+        image = Image.new("RGBA", (1, 1), (200, 0, 0, 128))
+        icc = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        with patch.object(ImageCms, "profileToProfile", return_value=Image.new("RGB", (1, 1), (10, 20, 30))) as convert:
+            decoded = worker.decode_image(self._png(image, icc_profile=icc), 100)
+        self.assertEqual(decoded.tolist(), [[[142, 137, 132]]])
+        self.assertEqual(convert.call_args.args[0].mode, "RGB")
+        self.assertEqual(convert.call_args.kwargs["outputMode"], "RGB")
+        invalid = self._png(image, icc_profile=b"invalid-icc")
+        with self.assertRaises(PhotographyError) as caught:
+            worker.decode_image(invalid, 100)
+        self.assertEqual(caught.exception.code, "FEATURE_IMAGE_INVALID")
+        self.assertIn("ICC", str(caught.exception))
+        self.assertIn("re-ingest", str(caught.exception))
+        self.assertEqual(worker.decode_image(self._png(image), 100).tolist(), [[[127, 127, 227]]])
+        self.assertEqual(worker.decode_image(invalid, 100, recipe=worker.LEGACY_IMAGE_DECODE).tolist(),
+                         [[[0, 0, 200]]])
+
+    def test_ingestion_shared_conversion_keeps_icc_fallback_warning_and_pixels(self):
+        from PIL import Image, ImageCms
+        from photography_lib.images import _preview
+        image = Image.new("RGBA", (8, 8), (200, 0, 0, 128))
+        config = Config(PROJECT / ".photography-state" / "unused-preview.sqlite")
+        plain, plain_jpeg = _preview(io.BytesIO(self._png(image)), config)
+        invalid, invalid_jpeg = _preview(io.BytesIO(self._png(image, icc_profile=b"invalid-icc")), config)
+        icc = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+        valid, valid_jpeg = _preview(io.BytesIO(self._png(image, icc_profile=icc)), config)
+        self.assertEqual(plain["color_handling"], "assumed_srgb")
+        self.assertEqual(plain["warnings"], [])
+        self.assertEqual(invalid["color_handling"], "assumed_srgb")
+        self.assertEqual(invalid["warnings"],
+                         ["Embedded color profile could not be converted; preview assumes sRGB."])
+        self.assertEqual(valid["color_handling"], "converted_to_srgb")
+        self.assertEqual(valid["warnings"], [])
+        with Image.open(io.BytesIO(plain_jpeg)) as plain_pixels, \
+                Image.open(io.BytesIO(invalid_jpeg)) as invalid_pixels, \
+                Image.open(io.BytesIO(valid_jpeg)) as valid_pixels:
+            self.assertEqual(plain_pixels.tobytes(), invalid_pixels.tobytes())
+            self.assertEqual(plain_pixels.tobytes(), valid_pixels.tobytes())
+
+    def test_engine_uses_versioned_ocr_decode_and_unchanged_detector_decode(self):
+        for component, recipe in (("ocr", OCR_IMAGE_DECODE), ("objects", worker.LEGACY_IMAGE_DECODE)):
+            engine = worker.Engine(ready_profile(component), {})
+            with self.subTest(component=component), \
+                    patch.object(worker, "decode_image", side_effect=PhotographyError("TEST_STOP", "No model call.")) as decode, \
+                    patch.object(engine, "_load") as load:
+                with self.assertRaises(PhotographyError):
+                    engine.compute(b"fixture")
+                decode.assert_called_once_with(b"fixture", 80000000, recipe=recipe)
+                load.assert_not_called()
+        with self.assertRaises(PhotographyError):
+            worker.decode_image(b"fixture", 100, recipe="unknown-decoder")
 
 
 @unittest.skipUnless(HAS_VISION_RUNTIME, "Optional isolated CPU vision runtime is not installed.")

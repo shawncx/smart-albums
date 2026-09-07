@@ -379,6 +379,7 @@ def _compute_compare(item, saved, store):
         participants = _verify_compare(saved, store)
         payloads = {row["result_id"]: store.feature_result(row["result_id"])["payload"]
                     for row in participants if row["result_id"] is not None}
+        checkpoint = store.prepare_similarity_checkpoint(saved["run_id"])
     metric = saved["options"]["metric"]
     threshold = saved["options"]["max_distance"]
     completed = item["progress"].get("comparisons", 0)
@@ -386,11 +387,13 @@ def _compute_compare(item, saved, store):
         raise PhotographyError("FEATURE_PLAN_INVALID", "Invalid comparison resume cursor.")
     position = 0
     pairs = []
+    endpoints = set()
     for i, left in enumerate(participants):
         for right in participants[i + 1:]:
             position += 1
             if position <= completed:
                 continue
+            endpoints.update((left["photo_id"], right["photo_id"]))
             distance = (int(left["content_version"] != right["content_version"]) if metric == "exact" else
                         hash_distance(payloads[left["result_id"]], payloads[right["result_id"]]))
             if distance <= threshold:
@@ -400,13 +403,13 @@ def _compute_compare(item, saved, store):
                               "metric": metric, "distance": distance})
             if position % 256 == 0:
                 with _item_transaction(store, item):
-                    store.put_similarity_pairs(saved["run_id"], pairs)
+                    store.put_similarity_checkpoint(checkpoint, pairs, position, endpoints)
                     item["progress"] = {"comparisons": position}
-                    store.update_feature_item(saved["run_id"], item)
                 pairs = []
+                endpoints = set()
     with _item_transaction(store, item):
         _verify_compare(saved, store)
-        store.put_similarity_pairs(saved["run_id"], pairs)
+        store.put_similarity_checkpoint(checkpoint, pairs, position, endpoints)
         item["progress"] = {"comparisons": position}
         _finish(store, saved["run_id"], item, "computed")
 

@@ -16,10 +16,12 @@ if __package__ in (None, ""):
 
 from photography_lib.config import PhotographyError
 from photography_lib import feature_models
+from photography_lib.feature_profiles import OCR_IMAGE_DECODE
 
 MAX_HEADER = 1024 * 1024
 MAX_IMAGE = 256 * 1024 * 1024
 MAX_RESPONSE = 64 * 1024 * 1024
+LEGACY_IMAGE_DECODE = "pillow-exif-rgb-v1"
 
 
 def read_exact(stream, count):
@@ -68,9 +70,11 @@ def disable_network():
     socket.socket.connect_ex = _deny_network
 
 
-def decode_image(data, max_pixels):
+def decode_image(data, max_pixels, *, recipe=OCR_IMAGE_DECODE):
     from PIL import Image, ImageOps
     import numpy as np
+    if recipe not in (OCR_IMAGE_DECODE, LEGACY_IMAGE_DECODE):
+        raise PhotographyError("FEATURE_MODEL_INVALID", "Unsupported image decoding recipe.")
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", Image.DecompressionBombWarning)
@@ -78,7 +82,24 @@ def decode_image(data, max_pixels):
                 if source.width * source.height > max_pixels:
                     raise PhotographyError("FEATURE_IMAGE_INVALID", "Input image exceeds the profile pixel limit.")
                 source.load()
-                image = ImageOps.exif_transpose(source).convert("RGB")
+                oriented = ImageOps.exif_transpose(source)
+                if recipe == OCR_IMAGE_DECODE:
+                    from PIL import ImageCms
+                    from photography_lib.images import srgb_on_white
+                    icc = source.info.get("icc_profile")
+                    srgb = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB"))
+                    try:
+                        image, _ = srgb_on_white(oriented, icc, srgb)
+                    except (ImageCms.PyCMSError, OSError, ValueError) as exc:
+                        if not icc:
+                            raise
+                        raise PhotographyError(
+                            "FEATURE_IMAGE_INVALID",
+                            "Cannot convert the embedded ICC profile to sRGB for OCR. "
+                            "Repair the image's color profile and re-ingest it before retrying.",
+                        ) from exc
+                else:
+                    image = oriented.convert("RGB")
                 return np.ascontiguousarray(np.asarray(image)[:, :, ::-1])
     except PhotographyError:
         raise
@@ -168,6 +189,7 @@ def yolox_decode(output, parameters, width, height, ratio):
 
 class Engine:
     def __init__(self, profile, paths):
+        feature_models.validate_provider_profile(profile)
         self.profile, self.paths = profile, paths
         self.engine = None
 
@@ -213,7 +235,8 @@ class Engine:
     def compute(self, data):
         from photography_lib.feature_profiles import validate_payload
         p = self.profile["parameters"]
-        image = decode_image(data, p.get("max_input_pixels", 80000000))
+        recipe = p["decode"] if self.profile["component"] == "ocr" else LEGACY_IMAGE_DECODE
+        image = decode_image(data, p.get("max_input_pixels", 80000000), recipe=recipe)
         if self.engine is None:
             self._load()
         height, width = image.shape[:2]

@@ -235,18 +235,61 @@ def _download(asset, path):
 
 @contextmanager
 def _setup_lock(parent):
+    from .exports import publish_new_file
+
     lock = parent / ".setup.lock"
+    marker = b"\0smart-albums-feature-setup-lock-v1\n"
+    if lock.is_symlink():
+        raise PhotographyError("FEATURE_SETUP_BUSY", "Feature setup cannot use a symbolic-link lock.")
+    if not lock.exists():
+        stage = parent / (".setup-lock-" + uuid.uuid4().hex + ".tmp")
+        marker_stream = stage.open("xb")
+        try:
+            with marker_stream:
+                marker_stream.write(marker)
+                marker_stream.flush()
+                os.fsync(marker_stream.fileno())
+            try:
+                # A complete marker is published without replacing a competing lock.
+                publish_new_file(stage, lock)
+            except FileExistsError:
+                pass
+        finally:
+            stage.unlink(missing_ok=True)
+    if lock.is_symlink():
+        raise PhotographyError("FEATURE_SETUP_BUSY", "Feature setup cannot use a symbolic-link lock.")
     try:
-        stream = lock.open("xb")
-    except FileExistsError as exc:
-        raise PhotographyError("FEATURE_SETUP_BUSY", "Feature setup lock exists; do not overwrite an active or unowned lock.") from exc
+        stream = lock.open("r+b")
+    except OSError as exc:
+        raise PhotographyError("FEATURE_SETUP_BUSY", "Cannot safely open the existing feature setup lock.") from exc
+    locked = False
     try:
-        with stream:
-            stream.write(str(os.getpid()).encode("ascii"))
-            stream.flush()
-            yield
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(stream.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(stream.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            locked = True
+        except OSError as exc:
+            raise PhotographyError("FEATURE_SETUP_BUSY", "Another feature model setup is active.") from exc
+        if stream.read(len(marker) + 1) != marker:
+            raise PhotographyError("FEATURE_SETUP_BUSY", "An unknown or legacy feature setup lock must not be overwritten.")
+        yield
     finally:
-        lock.unlink()
+        try:
+            if locked:
+                stream.seek(0)
+                if os.name == "nt":
+                    import msvcrt
+                    msvcrt.locking(stream.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(stream.fileno(), fcntl.LOCK_UN)
+        finally:
+            # Keep the same inode so waiters and subsequent processes lock one file.
+            stream.close()
 
 
 def prepared_profile(component, runtime):

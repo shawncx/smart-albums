@@ -523,6 +523,55 @@ class FeatureStorageTests(unittest.TestCase):
             with self.subTest(progress=progress), self.assertRaises(PhotographyError):
                 self.store.update_feature_item(plan["run_id"], {"item_id": "compare", "progress": progress})
 
+    def running_comparison(self, metric="hamming"):
+        plan, participants = self.compare(metric)
+        snapshot = plan["items"][0]
+        self.store.update_feature_run(plan["run_id"], confirmed_digest=plan["digest"], status="running")
+        self.store.claim_feature_input(plan["run_id"], snapshot["item_id"], plan["profile_id"], snapshot["input_fingerprint"])
+        self.store.update_feature_item(plan["run_id"], {"item_id": snapshot["item_id"], "status": "running"})
+        return plan, participants, self.store.prepare_similarity_checkpoint(plan["run_id"])
+
+    def test_checkpoint_batch_cursor_and_claims_are_atomic(self):
+        plan, participants, checkpoint = self.running_comparison()
+        a, b, unused = participants
+        write = self.store.put_similarity_checkpoint
+        for pairs, cursor, endpoints in (
+            ([self.pair(a, b), self.pair(a, a)], 1, {"a", "b"}),
+            ([self.pair(a, b)], 4, {"a", "b"}),
+            ([self.pair(a, b)], True, {"a", "b"}),
+            ([], 1, {"outside"}),
+        ):
+            with self.subTest(pairs=pairs, cursor=cursor), self.assertRaises(PhotographyError):
+                write(checkpoint, pairs, cursor, endpoints)
+            self.assertEqual(self.store.similarity_pairs(plan["run_id"])["total"], 0)
+            self.assertEqual(self.store.feature_items(plan["run_id"])[0]["progress"], {})
+        with self.assertRaises(RuntimeError), self.store.transaction():
+            write(checkpoint, [self.pair(a, b)], 1, {"a", "b"})
+            raise RuntimeError("rollback checkpoint and cursor")
+        self.assertEqual(self.store.feature_items(plan["run_id"])[0]["progress"], {})
+        self.assertEqual(self.store.similarity_pairs(plan["run_id"])["total"], 0)
+        write(checkpoint, [self.pair(a, b)], 1, {"a", "b"})
+        self.assertEqual(self.store.feature_items(plan["run_id"])[0]["progress"], {"comparisons": 1})
+        self.store.release_feature_input(plan["run_id"], "compare")
+        with self.assertRaises(PhotographyError) as failure:
+            write(checkpoint, [], 2, {"a", "b"})
+        self.assertEqual(failure.exception.code, "FEATURE_IN_PROGRESS")
+        self.assertEqual(self.store.feature_items(plan["run_id"])[0]["progress"], {"comparisons": 1})
+
+    def test_checkpoint_revalidates_changed_rejected_endpoints_without_pairs(self):
+        for metric in ("exact", "hamming"):
+            plan, participants, checkpoint = self.running_comparison(metric)
+            if metric == "hamming":
+                self.store.db.execute("UPDATE thumbnails SET image_hash=? WHERE photo_id='b'", ("f" * 64,))
+            else:
+                self.store.put_photo({**self.store.photo("b"), "content_version": "changed"})
+            with self.subTest(metric=metric), self.assertRaises(PhotographyError):
+                self.store.put_similarity_checkpoint(checkpoint, [], 1, {"a", "b"})
+            self.assertEqual(self.store.feature_items(plan["run_id"])[0]["progress"], {})
+            self.assertEqual(self.store.similarity_pairs(plan["run_id"])["total"], 0)
+            self.store.release_feature_input(plan["run_id"], "compare")
+            self.photo("b")
+
     def test_strict_fts_registration_rejects_unknown_shadow_and_modified_triggers(self):
         for mutation in ("CREATE TABLE arbitrary_data(id)", "CREATE TABLE sqliteevil(id)",
                          "CREATE TABLE image_ocr_fts_content(id)",

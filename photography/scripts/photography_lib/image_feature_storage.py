@@ -325,9 +325,17 @@ def feature_schema_registry():
 def _feature_write(store):
     try:
         with store.transaction():
+            before = store.db.total_changes
             yield
+            store._record_photo_changes(before)
     except sqlite3.IntegrityError as exc:
         raise PhotographyError("FEATURE_CONFLICT", f"Feature identity or integrity constraint failed: {exc}") from exc
+
+
+class _ComparisonCheckpoint:
+    def __init__(self, store, plan, participants):
+        self.store, self.plan, self.participants = store, plan, participants
+        self.token = store.change_token()
 
 
 class ImageFeatureStorage:
@@ -1087,9 +1095,23 @@ class ImageFeatureStorage:
                 if "manifest" in participant:
                     _require(source["input_manifest"] == manifest, "Comparison participant manifest does not match.")
             result[participant["photo_id"]] = {"content_version": content_version, "result_id": result_id}
+            if metric == "hamming":
+                result[participant["photo_id"]].update(input_fingerprint=source["input_fingerprint"],
+                    payload_hash=source["payload_hash"], manifest=source["input_manifest"])
         return result
 
-    def _validate_pair(self, plan, participants, pair, *, current):
+    def _comparison_source(self, plan, photo_id, participant):
+        source = self.feature_result(participant["result_id"])
+        _require(source["photo_id"] == photo_id and source["profile_id"] == plan["profile_id"] and
+                 source["component"] == "perceptual_hash" and
+                 source["content_version"] == participant["content_version"] and
+                 source["input_fingerprint"] == participant["input_fingerprint"] and
+                 source["payload_hash"] == participant["payload_hash"] and
+                 source["input_manifest"] == participant["manifest"],
+                 "Comparison source differs from its frozen identity.", "FEATURE_INPUT_CHANGED")
+        return source
+
+    def _validate_pair(self, plan, participants, pair, *, current, verified_payloads=None):
         fields = {"photo_id_a", "photo_id_b", "result_id_a", "result_id_b",
                   "content_version_a", "content_version_b", "metric", "distance"}
         _require(isinstance(pair, dict) and set(pair) == fields, "Invalid similarity pair fields.")
@@ -1114,7 +1136,8 @@ class ImageFeatureStorage:
                 _require(self.photo(photo_id)["content_version"] == participant["content_version"],
                          "Comparison photo content changed.", "FEATURE_INPUT_CHANGED")
             if metric == "hamming":
-                sources.append(self.feature_result(participant["result_id"])["payload"])
+                sources.append(verified_payloads[photo_id] if verified_payloads is not None else
+                               self._comparison_source(plan, photo_id, participant)["payload"])
         if metric == "exact":
             _require(pair["result_id_a"] is None and pair["result_id_b"] is None and distance == 0 and
                      pair["content_version_a"] == pair["content_version_b"], "Exact pair identities are not equal.")
@@ -1130,21 +1153,95 @@ class ImageFeatureStorage:
         with _feature_write(self):
             plan = self.feature_run(run_id)["plan"]
             participants = self._compare_participants(plan)
-            for supplied in pairs:
-                pair = self._validate_pair(plan, participants, supplied, current=True)
-                existing = self.db.execute("""SELECT * FROM image_similarity_pairs
-                    WHERE run_id=? AND photo_id_a=? AND photo_id_b=? AND metric=?""",
-                    (run_id, pair["photo_id_a"], pair["photo_id_b"], pair["metric"])).fetchone()
-                if existing is not None:
-                    _require(all(existing[key] == value for key, value in pair.items()),
-                             "A different immutable pair already exists.", "FEATURE_CONFLICT")
-                    continue
-                self.db.execute("""INSERT INTO image_similarity_pairs
-                    (run_id,profile_id,photo_id_a,photo_id_b,result_id_a,result_id_b,content_version_a,content_version_b,
-                     metric,distance) VALUES (?,?,?,?,?,?,?,?,?,?)""",
-                    (run_id, plan["profile_id"], *(pair[key] for key in (
-                        "photo_id_a", "photo_id_b", "result_id_a", "result_id_b", "content_version_a", "content_version_b",
-                        "metric", "distance"))))
+            self._put_similarity_pairs(plan, participants, pairs)
+
+    def _put_similarity_pairs(self, plan, participants, pairs, *, verified_payloads=None):
+        run_id = plan["run_id"]
+        for supplied in pairs:
+            pair = self._validate_pair(plan, participants, supplied, current=verified_payloads is None,
+                                       verified_payloads=verified_payloads)
+            existing = self.db.execute("""SELECT * FROM image_similarity_pairs
+                WHERE run_id=? AND photo_id_a=? AND photo_id_b=? AND metric=?""",
+                (run_id, pair["photo_id_a"], pair["photo_id_b"], pair["metric"])).fetchone()
+            if existing is not None:
+                _require(all(existing[key] == value for key, value in pair.items()),
+                         "A different immutable pair already exists.", "FEATURE_CONFLICT")
+                continue
+            self.db.execute("""INSERT INTO image_similarity_pairs
+                (run_id,profile_id,photo_id_a,photo_id_b,result_id_a,result_id_b,content_version_a,content_version_b,
+                 metric,distance) VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                (run_id, plan["profile_id"], *(pair[key] for key in (
+                    "photo_id_a", "photo_id_b", "result_id_a", "result_id_b", "content_version_a", "content_version_b",
+                    "metric", "distance"))))
+
+    def prepare_similarity_checkpoint(self, run_id):
+        with self.read_snapshot():
+            plan = self._validate_feature_plan(self.feature_run(run_id)["plan"])
+            participants = self._compare_participants(plan)
+            items = self.feature_items(run_id)
+            _require(len(items) == 1 and items[0]["snapshot"] == plan["items"][0],
+                     "Comparison checkpoint scope changed.", "FEATURE_PLAN_INVALID")
+            return _ComparisonCheckpoint(self, plan, participants)
+
+    def put_similarity_checkpoint(self, checkpoint, pairs, comparisons, photo_ids):
+        """Commit a bounded batch and its cursor without rereading the frozen scope."""
+        _require(isinstance(checkpoint, _ComparisonCheckpoint) and checkpoint.store is self,
+                 "Comparison checkpoint belongs to another storage connection.")
+        _require(isinstance(pairs, (list, tuple)) and isinstance(photo_ids, (set, list, tuple)),
+                 "Comparison checkpoint requires pairs and their processed endpoints.")
+        with _feature_write(self):
+            plan = checkpoint.plan
+            if checkpoint.token != self.change_token():
+                # Other writes (including trigger/plan tampering) never inherit a
+                # cached approval. Only our own pair/cursor writes advance the token.
+                refreshed = self.prepare_similarity_checkpoint(plan["run_id"])
+                _require(refreshed.plan == plan and refreshed.participants == checkpoint.participants,
+                         "Comparison checkpoint identity changed.", "FEATURE_PLAN_INVALID")
+            snapshot = plan["items"][0]
+            run = self._feature_run_metadata(plan["run_id"])
+            row = self.db.execute("""SELECT photo_id,profile_id,work_kind,input_fingerprint,action,
+                status,result_id,progress_json FROM image_feature_items WHERE run_id=? AND item_id=?""",
+                (plan["run_id"], snapshot["item_id"])).fetchone()
+            _require(run["digest"] == plan["digest"] and run["confirmed_digest"] == plan["digest"] and
+                     row is not None and row["photo_id"] is None and row["profile_id"] == plan["profile_id"] and
+                     row["work_kind"] == "compare" and row["input_fingerprint"] == snapshot["input_fingerprint"] and
+                     row["action"] == "compute" and row["status"] == "running" and row["result_id"] is None,
+                     "Comparison checkpoint is not the approved running item.", "FEATURE_PLAN_INVALID")
+            claim = self.db.execute("""SELECT 1 FROM image_feature_claims
+                WHERE run_id=? AND item_id=? AND profile_id=? AND input_fingerprint=? AND scope_key='compare'""",
+                (plan["run_id"], snapshot["item_id"], plan["profile_id"], snapshot["input_fingerprint"])).fetchone()
+            _require(claim is not None, "Comparison input is no longer claimed.", "FEATURE_IN_PROGRESS")
+            progress = {"comparisons": comparisons}
+            previous = _load(row["progress_json"])
+            _require(isinstance(previous, dict), "Invalid comparison progress.")
+            self._validate_item_progress("compare", snapshot, previous)
+            self._validate_item_progress("compare", snapshot, progress)
+            _require(comparisons >= previous.get("comparisons", 0), "Comparison cursor cannot move backwards.")
+            _require(all(_text(photo_id) for photo_id in photo_ids), "Invalid comparison endpoint IDs.")
+            endpoints = set(photo_ids)
+            for pair in pairs:
+                _require(isinstance(pair, dict) and _text(pair.get("photo_id_a")) and _text(pair.get("photo_id_b")),
+                         "Invalid similarity pair.")
+                endpoints.update((pair["photo_id_a"], pair["photo_id_b"]))
+            payloads = {}
+            for photo_id in endpoints:
+                participant = checkpoint.participants.get(photo_id)
+                _require(participant is not None, "Comparison endpoint is outside the approved scope.")
+                photo = self.photo(photo_id)
+                _require(photo["ingest_state"] == "available" and
+                         photo["content_version"] == participant["content_version"],
+                         "Comparison photo content changed.", "FEATURE_INPUT_CHANGED")
+                if plan["options"]["metric"] == "hamming":
+                    from .feature_inputs import verify_manifest
+
+                    source = self._comparison_source(plan, photo_id, participant)
+                    verify_manifest(photo_id, plan["profile"], source["input_manifest"], store=self)
+                    payloads[photo_id] = source["payload"]
+            self._put_similarity_pairs(plan, checkpoint.participants, pairs, verified_payloads=payloads)
+            self.db.execute("""UPDATE image_feature_items SET progress_json=?,updated_at=?
+                WHERE run_id=? AND item_id=?""", (_json(progress), _timestamp(), plan["run_id"], snapshot["item_id"]))
+            token = self.change_token()
+        checkpoint.token = token
 
     def similarity_pairs(self, run_id, *, limit=100, after=0):
         _limit(limit)

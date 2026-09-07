@@ -16,7 +16,7 @@ from PIL import Image
 
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "photography" / "scripts"))
-from photography_lib import condition_search, feature_inputs, virtual_folders
+from photography_lib import condition_queries, condition_search, feature_inputs, virtual_folders
 from photography_lib.config import Config, PhotographyError
 from photography_lib.feature_profiles import default_profile, normalize_ocr_text
 from photography_lib.fingerprints import fingerprint
@@ -267,6 +267,43 @@ class ConditionSearchTests(unittest.TestCase):
         self.assertEqual(rows["a"]["matched_count"], 1)
         self.assertEqual(rows["b"]["conditions"]["O"]["status"], "matched")
         condition_search.show_results(snapshot, store=self.store)
+
+    def test_repeated_color_predicates_count_once_and_conflicting_scoring_is_rejected(self):
+        for pid, fraction in (("a", .9), ("b", .3), ("c", .0)):
+            self.color(pid, fraction)
+        predicate = {"kind": "color_fraction", "color": "blue", "minimum": .2}
+        for scoring in ("exact", "graded"):
+            with self.subTest(scoring=scoring):
+                first = {"id": "A", **predicate, "scoring": scoring}
+                second = {"id": "B", **predicate, "scoring": scoring}
+                if scoring == "graded":
+                    first.pop("scoring")
+                snapshot = self.query([first, second])
+                self.assertEqual(snapshot["aliases"], {"A": "A", "B": "A"})
+                self.assertEqual({row["photo_id"] for row in snapshot["results"]}, {"a", "b"})
+                self.assertTrue(all(row["matched_count"] == 1 for row in snapshot["results"]))
+                condition_search.show_results(snapshot, store=self.store)
+                second["scoring"] = "exact" if scoring == "graded" else "graded"
+                with self.assertRaisesRegex(PhotographyError, "same scoring policy"):
+                    self.query([first, second])
+        distinct = self.query([{"id": "A", **predicate}, {"id": "B", **predicate, "minimum": .8}])
+        self.assertEqual(distinct["aliases"], {"A": "A", "B": "B"})
+        self.assertEqual({row["photo_id"]: row["matched_count"] for row in distinct["results"]}, {"a": 2, "b": 1})
+
+    def test_repeated_scene_predicates_reject_conflicting_scoring(self):
+        profile = default_profile("scene", dependency_profile_id=self.embedding_id)
+        profile_id = self.store.put_feature_profile(profile)
+        predicate = {"kind": "scene", "profile_id": profile_id,
+                     "scene_id": profile["parameters"]["catalog"][0]["scene_id"], "minimum": .2}
+        for first, second in (("exact", "graded"), ("graded", "exact")):
+            with self.subTest(first=first), self.assertRaisesRegex(PhotographyError, "same scoring policy"):
+                condition_queries.normalize_query({"conditions": [
+                    {"id": "A", **predicate, "scoring": first}, {"id": "B", **predicate, "scoring": second},
+                ]}, store=self.store)
+        normalized = condition_queries.normalize_query({"conditions": [
+            {"id": "A", **predicate}, {"id": "B", **predicate, "scoring": "graded"},
+        ]}, store=self.store)
+        self.assertEqual(normalized["aliases"], {"A": "A", "B": "A"})
 
     def test_empty_scope_and_empty_selections_are_valid_without_implicit_expansion(self):
         self.seed_vectors()

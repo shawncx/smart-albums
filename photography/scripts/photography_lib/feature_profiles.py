@@ -16,6 +16,7 @@ INPUT_SCOPES = {
     "color": "stored_thumbnail", "composition": "object_result",
     "perceptual_hash": "stored_thumbnail",
 }
+OCR_IMAGE_DECODE = "pillow-exif-icc-strict-srgb-white-alpha-v1"
 COCO_CLASS_IDS = (
     "person", "bicycle", "car", "motorcycle", "airplane", "bus", "train", "truck",
     "boat", "traffic light", "fire hydrant", "stop sign", "parking meter", "bench",
@@ -44,6 +45,7 @@ _PARAMETERS = {
     "ocr": {
         "model": "PP-OCRv6-small", "orientation_model": "ch_ppocr_mobile_v2.0_cls",
         "orientation": "pillow-exif-transpose", "use_cls": False,
+        "decode": OCR_IMAGE_DECODE,
         "det_limit_side_len": 1280, "det_limit_type": "max",
         "det_thresh": 0.3, "det_box_thresh": 0.5, "det_unclip_ratio": 1.6,
         "text_score": 0.5, "max_blocks": 4096, "max_text_chars": 1000000,
@@ -83,7 +85,7 @@ _PARAMETERS = {
     },
 }
 _PROVIDERS = {
-    "ocr": "rapidocr-3.9.2-onnx-v1", "objects": "yolox-nano-onnx-v1",
+    "ocr": "rapidocr-3.9.2-onnx-v2", "objects": "yolox-nano-onnx-v1",
     "scene": "embedding-cosine-v1", "color": "pillow-color-v1",
     "composition": "box-geometry-v1", "perceptual_hash": "pillow-dhash-v1",
 }
@@ -193,9 +195,17 @@ def _validate_assets(assets):
 
 
 def _validate_parameters(component, parameters):
-    _fields(parameters, _PARAMETERS[component], {"dimensions"} if component == "scene" else ())
+    required = set(_PARAMETERS[component])
+    optional = {"dimensions"} if component == "scene" else set()
+    if component == "ocr":
+        # Historical v1 OCR evidence predates the explicit original-image decoder.
+        required.remove("decode")
+        optional.add("decode")
+    _fields(parameters, required, optional)
     p = parameters
     if component == "ocr":
+        if "decode" in p:
+            _require(p["decode"] == OCR_IMAGE_DECODE, "Unsupported OCR image decoder.")
         for key in ("model", "orientation_model", "det_limit_type", "normalization",
                     "orientation", "dictionary", "use_preprocess_img", "use_vertical_padding",
                     "det_max_candidates"):
@@ -311,7 +321,7 @@ def default_profile(component, *, dependency_profile_id=None):
 
 
 def profile_identity(profile):
-    """Validate a recipe and return its SHA-256 and canonical finite JSON."""
+    """Validate a readable stored profile, not provider executability, and hash it."""
     try:
         _validate_profile(profile)
         encoded = json.dumps(profile, ensure_ascii=False, sort_keys=True,

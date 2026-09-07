@@ -337,6 +337,106 @@ class FeatureIndexTests(unittest.TestCase):
         self.assertNotEqual(result["status"], "completed")
         self.assertEqual(self.store.similarity_pairs(plan["run_id"])["total"], 0)
 
+    def comparison_fixture(self, size, metric, *, matching=False):
+        profile = self.profile("perceptual_hash")
+        ids = [f"compare_{metric}_{size}_{index:03}" for index in range(size)]
+        template = self.store.photo(self.ids[0])
+        with self.store.transaction():
+            for index, pid in enumerate(ids):
+                photo = {**template, "photo_id": pid,
+                         "content_version": template["content_version"] if matching else hashlib.sha256(pid.encode()).hexdigest()}
+                self.store.put_photo(photo)
+                if metric == "hamming":
+                    self.store.put_thumbnail(photo, self.data)
+                    manifest = feature_inputs.manifest_for(pid, profile, store=self.store)
+                    self.store.put_feature_result(pid, fingerprint(profile), manifest, {
+                        "complete": True, "algorithm": "dhash", "bits": 64,
+                        "hash_hex": f"{0 if matching else index:016x}"})
+        return feature_index.create_compare_plan(ids, store=self.store, config=self.config,
+                                                  profile=profile, metric=metric, max_distance=0)
+
+    def test_compare_checkpoint_scope_validation_is_linear_not_per_batch(self):
+        for size in (24, 48):
+            for metric in ("exact", "hamming"):
+                for matching in (False, True):
+                    plan = self.comparison_fixture(size, metric, matching=matching)
+                    comparisons = size * (size - 1) // 2
+                    with self.subTest(size=size, metric=metric, matching=matching), \
+                         patch.object(self.store, "_compare_participants", wraps=self.store._compare_participants) as scopes, \
+                         patch.object(self.store, "_validate_feature_plan", wraps=self.store._validate_feature_plan) as plans, \
+                         patch.object(self.store, "feature_run", wraps=self.store.feature_run) as full_reads, \
+                         patch.object(self.store, "_feature_item_from_row", wraps=self.store._feature_item_from_row) as items, \
+                         patch.object(self.store, "feature_result", wraps=self.store.feature_result) as sources, \
+                         patch.object(self.store, "put_similarity_checkpoint", wraps=self.store.put_similarity_checkpoint) as batches:
+                        result = self.execute(plan)
+                        self.assertEqual(result["status"], "completed", result)
+                        self.assertEqual(scopes.call_count, 2)
+                        self.assertEqual(sum(len(call.args[0]["items"][0]["manifest"]["participants"])
+                                             for call in scopes.call_args_list), 2 * size)
+                        self.assertEqual(plans.call_count, 1)
+                        self.assertLessEqual(full_reads.call_count, 10)
+                        self.assertLessEqual(items.call_count, 10)
+                        self.assertEqual(batches.call_count, comparisons // 256 + 1)
+                        self.assertLessEqual(sources.call_count, 10 * size + 2 * comparisons)
+                    self.assertEqual(self.store.similarity_pairs(plan["run_id"])["total"],
+                                     comparisons if matching else 0)
+
+    def test_cached_compare_rejects_plan_and_snapshot_tampering_at_checkpoint(self):
+        for table, trigger, field in (
+            ("image_feature_runs", "image_feature_plan_immutable", "plan_json"),
+            ("image_feature_items", "image_feature_snapshot_immutable", "snapshot_json"),
+        ):
+            plan = self.comparison_fixture(32, "exact", matching=True)
+            write = self.store.put_similarity_checkpoint
+            calls = 0
+
+            def tamper(checkpoint, pairs, comparisons, endpoints):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    self.store.db.execute(f"DROP TRIGGER {trigger}")
+                    self.store.db.execute(f"UPDATE {table} SET {field}=json_set({field},'$.tampered',1) WHERE run_id=?",
+                                          (plan["run_id"],))
+                return write(checkpoint, pairs, comparisons, endpoints)
+
+            with self.subTest(table=table), patch.object(self.store, "put_similarity_checkpoint", side_effect=tamper):
+                result = self.execute(plan)
+            self.assertEqual(result["status"], "failed", result)
+            self.assertEqual(result["items"][0]["progress"]["comparisons"], 256)
+            self.assertEqual(self.store.similarity_pairs(plan["run_id"])["total"], 256)
+            self.assertEqual(result["items"][0]["error"]["code"], "FEATURE_PLAN_INVALID")
+            resumed = feature_index.execute_plan(plan["run_id"], store=self.store, config=self.config, resume=True)
+            self.assertEqual(resumed["status"], "completed", resumed)
+
+    def test_compare_revalidates_concurrent_changes_even_after_endpoint_was_processed(self):
+        for metric in ("exact", "hamming"):
+            plan = self.comparison_fixture(32, metric, matching=True)
+            pid = plan["items"][0]["manifest"]["participants"][0]["photo_id"]
+            item_transaction = feature_index._item_transaction
+            changed = False
+            with SQLiteStorage.open(self.config.database_path, writable=True) as writer:
+                @contextmanager
+                def mutate_after_checkpoint(store, item):
+                    nonlocal changed
+                    with item_transaction(store, item):
+                        yield
+                    if not changed and item["progress"].get("comparisons") == 256:
+                        changed = True
+                        if metric == "exact":
+                            writer.put_photo({**writer.photo(pid), "content_version": hashlib.sha256(b"new").hexdigest()})
+                        else:
+                            writer.put_thumbnail(writer.photo(pid), self.jpeg("white"))
+
+                with self.subTest(metric=metric), patch.object(feature_index, "_item_transaction", mutate_after_checkpoint):
+                    result = self.execute(plan)
+            self.assertTrue(changed)
+            self.assertNotEqual(result["status"], "completed")
+            self.assertEqual(result["items"][0]["progress"]["comparisons"], 256)
+            self.assertEqual(self.store.similarity_pairs(plan["run_id"])["total"], 256)
+            resumed = feature_index.execute_plan(plan["run_id"], store=self.store, config=self.config, resume=True)
+            self.assertNotEqual(resumed["status"], "completed")
+            self.assertEqual(self.store.similarity_pairs(plan["run_id"])["total"], 256)
+
     def test_compare_checkpoint_rollback_never_skips_uncommitted_pairs(self):
         profile = self.profile("perceptual_hash")
         with self.store.transaction():

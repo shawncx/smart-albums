@@ -53,7 +53,7 @@ they are not independently mergeable branches.
 Existing v1–v9 databases are rejected unchanged; unrelated SQLite files and damaged
 files also error, not reinitialized or migrated. Keep old user databases and backups untouched.
 Creating a separately requested new album is not a conversion of the old one.
-See [storage design](../../docs/index-design.md).
+See the [storage summary](#storage-summary).
 
 Virtual folders are static, flat many-to-many collections inside this one album,
 not another album/file selector. Their unchanged tables are
@@ -70,6 +70,18 @@ browse/search scope and confirmed one-time EXIF date plans. Reports use
 Stage-one [feature components](index.md#stage-1-six-opt-in-components) are explicit
 index operations, not new capabilities or automatic work when opening a file.
 Stage 2 OR search is implemented through separate [condition commands](search.md#stage-2-or-condition-workflow); targeted integration checks have passed. Metadata/semantic defaults are unchanged. All condition queries open the selected album read-only, without DDL, migration, defaults or automatic membership changes; private snapshots/public result pages are exports, not new tables.
+
+## Storage summary
+
+The installed Skill needs these operational boundaries, not a repository schema-development history:
+
+- The 32 ordinary tables hold album identity, photos/current previews and scans; six `image_embedding_*` tables; the two virtual-folder tables; and 19 feature tables for profiles, results, typed evidence, dependencies, settings, jobs, prototypes and pairs.
+- `image_ocr_documents` is authoritative saved text. `image_ocr_fts` and its four registered shadows are derived external-content FTS5 storage. Only explicit `index rebuild-fts --confirm` rebuilds it; open and search never perform repairs.
+- Paths locate originals, while saved content/profile/input identities govern reuse and current-result eligibility. Old profile/input results are not automatically deleted. Historical inspection is not current coverage or proof that dependencies remain intact.
+- `album-snapshot-v2` exports retain historical album/folder scope. OR queries use separate `condition-search-snapshot-v1` private snapshots and `condition-search-page-v1` public pages. These files are not tables, backups, live rules or authorization for membership writes.
+- Ordinary text-query vectors are transient; versioned scene prototypes are saved evidence. Models, Python environments and originals are outside SQLite and are not bundled with this Skill.
+
+Use [index](index.md) for exact-plan execution, source validation and recovery boundaries, [search](search.md) for snapshot selection, and the backup procedure below before moving an album. Do not edit tables, delete evidence or bypass a format error to emulate unsupported repair or migration.
 
 ## Portable originals
 
@@ -141,6 +153,5 @@ A saved run still marked `running` requires confirmation that all old workers ha
 stopped before `index resume <run-id> --confirm-stopped`; the flag does not bypass
 a live OS lock or grant missing inference approval.
 
-Historical folder regressions do not validate stage-one features; see
-[validation status](../../docs/TODO.md). Real-model performance and disconnected
-operation are not claimed without recorded verification.
+Synthetic regression checks do not establish real-model performance, quality,
+cross-host support or disconnected operation; claim only recorded verification.

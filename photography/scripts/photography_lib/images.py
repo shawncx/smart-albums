@@ -39,6 +39,26 @@ def _value(value):
         return str(value)
 
 
+def srgb_on_white(oriented, icc, srgb, *, allow_invalid_icc=False):
+    """Convert oriented pixels; an explicitly allowed ICC fallback returns its warning."""
+    alpha = oriented.convert("RGBA").getchannel("A") if "A" in oriented.getbands() or "transparency" in oriented.info else None
+    rgb = oriented.convert("RGB")
+    warning = None
+    if icc:
+        try:
+            color_input = oriented if oriented.mode in ("RGB", "CMYK", "LAB", "L") else rgb
+            rgb = ImageCms.profileToProfile(color_input, ImageCms.ImageCmsProfile(io.BytesIO(icc)), srgb, outputMode="RGB")
+        except (ImageCms.PyCMSError, OSError, ValueError):
+            if not allow_invalid_icc:
+                raise
+            warning = "Embedded color profile could not be converted; preview assumes sRGB."
+    if alpha is not None:
+        background = Image.new("RGB", rgb.size, "white")
+        background.paste(rgb, mask=alpha)
+        rgb = background
+    return rgb, warning
+
+
 def _preview(source, config: Config) -> tuple[dict, bytes]:
     with warnings.catch_warnings():
         warnings.simplefilter("error", Image.DecompressionBombWarning)
@@ -62,22 +82,10 @@ def _preview(source, config: Config) -> tuple[dict, bytes]:
             metadata.update(display_width=oriented.width, display_height=oriented.height)
             icc = image.info.get("icc_profile")
             srgb = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB"))
-            alpha = oriented.convert("RGBA").getchannel("A") if "A" in oriented.getbands() or "transparency" in oriented.info else None
-            rgb = oriented.convert("RGB")
-            if icc:
-                try:
-                    color_input = oriented if oriented.mode in ("RGB", "CMYK", "LAB", "L") else rgb
-                    rgb = ImageCms.profileToProfile(color_input, ImageCms.ImageCmsProfile(io.BytesIO(icc)), srgb, outputMode="RGB")
-                    metadata["color_handling"] = "converted_to_srgb"
-                except (ImageCms.PyCMSError, OSError, ValueError):
-                    metadata["warnings"].append("Embedded color profile could not be converted; preview assumes sRGB.")
-                    metadata["color_handling"] = "assumed_srgb"
-            else:
-                metadata["color_handling"] = "assumed_srgb"
-            if alpha is not None:
-                background = Image.new("RGB", rgb.size, "white")
-                background.paste(rgb, mask=alpha)
-                rgb = background
+            rgb, warning = srgb_on_white(oriented, icc, srgb, allow_invalid_icc=True)
+            metadata["color_handling"] = "converted_to_srgb" if icc and warning is None else "assumed_srgb"
+            if warning is not None:
+                metadata["warnings"].append(warning)
             rgb.thumbnail((config.thumbnail_size, config.thumbnail_size), Image.Resampling.LANCZOS)
             metadata.update(thumbnail_width=rgb.width, thumbnail_height=rgb.height)
             result = io.BytesIO()

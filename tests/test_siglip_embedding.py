@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import shutil
 import struct
+import subprocess
 import sys
 from types import SimpleNamespace
 import unittest
@@ -575,8 +576,21 @@ class LocalFixtureTests(unittest.TestCase):
 
 class RuntimeMetadataTests(unittest.TestCase):
     def test_metadata_modules_have_not_imported_optional_runtime(self):
-        for name in ("torch", "transformers", "tokenizers", "huggingface_hub", "numpy"):
-            self.assertNotIn(name, sys.modules)
+        script = """
+import sys
+sys.path.insert(0, sys.argv[1])
+from photography_lib import (
+    cli, feature_models, feature_profiles, image_embedding_profiles,
+    image_vectors, management, siglip_embedding, sqlite_storage,
+)
+loaded = [name for name in ("torch", "transformers", "tokenizers", "huggingface_hub", "numpy")
+          if name in sys.modules]
+assert not loaded, "Metadata imports loaded optional runtimes: " + repr(loaded)
+"""
+        result = subprocess.run([sys.executable, "-I", "-B", "-c", script,
+                                 str(PROJECT / "photography" / "scripts")],
+                                capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
 
     def test_missing_dependency_and_wrong_identity_are_explicit(self):
         with patch.object(importlib.metadata, "version", side_effect=importlib.metadata.PackageNotFoundError("torch")):

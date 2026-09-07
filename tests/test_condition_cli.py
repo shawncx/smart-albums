@@ -15,7 +15,8 @@ PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "photography" / "scripts"))
 
 import test_management as fixtures
-from photography_lib import cli, condition_search, management_cli, virtual_folders
+from photography_lib import cli, condition_search, exports, management_cli, virtual_folders
+from photography_lib import condition_report as report_module
 from photography_lib.condition_report import condition_report
 from photography_lib.config import PhotographyError
 from photography_lib.sqlite_storage import SQLiteStorage
@@ -128,6 +129,25 @@ class ConditionCliTests(unittest.TestCase):
         self.assertEqual(len(private["candidates"]), 3)
         self.assertEqual(json.loads((self.base / "query.json").read_text(encoding="utf-8"))["conditions"][0]["query"],
                          "synthetic beach")
+
+    def test_condition_exports_cannot_truncate_inputs_linked_after_preflight(self):
+        _, ranked, _, _, _ = self.finalized()
+        before = ranked.read_bytes()
+        for extension in (".json", ".html"):
+            output = self.base / ("racing-page" + extension)
+            real_write = exports.write_export
+
+            def race(target, data):
+                os.link(ranked, output)
+                return real_write(target, data)
+
+            module = management_cli if extension == ".json" else report_module
+            with self.subTest(extension=extension), patch.object(module, "write_export", side_effect=race):
+                self.assert_invalid(self.command, "show-query-results", ranked,
+                                    "--output" if extension == ".json" else "--html", output, code="EXPORT_PATH_CHANGED")
+            self.assertEqual(ranked.read_bytes(), before)
+            self.assertTrue(output.samefile(ranked))
+            output.unlink()
 
     def test_evidence_contains_only_query_numeric_similarity_and_identity(self):
         summary, snapshot, _ = self.semantic()

@@ -139,7 +139,8 @@ def _search_candidates(snapshot, store):
     seen = set()
     previous = None
     for item in snapshot["results"]:
-        fields = ("photo_id", "result_id", "profile_id", "content_version", "thumbnail_profile", "input_image_hash")
+        fields = ("photo_id", "result_id", "profile_id", "content_version", "thumbnail_profile", "input_image_hash",
+                  "vector_hash")
         if (not isinstance(item, dict)
                 or any(not isinstance(item.get(key), str) or not item[key] for key in fields)
                 or item["profile_id"] != snapshot["profile_id"]
@@ -171,7 +172,7 @@ def _check_candidate(item, store, profile):
     from .image_embedding import inspect_embedding
     photo = store.photo(item["photo_id"])
     entry, record, _ = inspect_embedding(photo, store, profile)
-    fields = ("result_id", "profile_id", "content_version", "thumbnail_profile", "input_image_hash")
+    fields = ("result_id", "profile_id", "content_version", "thumbnail_profile", "input_image_hash", "vector_hash")
     if entry["status"] != "ready" or any(record[key] != item[key] for key in fields):
         raise PhotographyError("SEARCH_SNAPSHOT_STALE",
                                "A candidate changed since this search. Retrieve and review a new snapshot.",
@@ -195,7 +196,7 @@ def select_search_results(snapshot, photo_ids, *, store):
             if item["photo_id"] in selected:
                 _check_candidate(item, store, profile)
                 result = {key: item[key] for key in (
-                    "photo_id", "result_id", "profile_id", "content_version", "thumbnail_profile", "input_image_hash",
+                    "photo_id", "result_id", "profile_id", "content_version", "thumbnail_profile", "input_image_hash", "vector_hash",
                     "score", "candidate_rank", "score_gap_from_best", "score_gap_to_next")}
                 results.append(result)
         scope = snapshot_scope(snapshot)
@@ -333,7 +334,7 @@ def semantic_search(query, *, store, config=None, profile_id=None, limit=10, aft
             counts[entry["status"]] += 1
             if entry["status"] == "ready":
                 candidate = {"photo_id": item["photo_id"], **{key: record[key] for key in (
-                    "result_id", "profile_id", "content_version", "thumbnail_profile", "input_image_hash"
+                    "result_id", "profile_id", "content_version", "thumbnail_profile", "input_image_hash", "vector_hash"
                 )}}
                 candidates.append((candidate, vector))
         result = _snapshot("search", store, profile, mode="semantic", scope=scope)
@@ -450,15 +451,14 @@ def backup(output, *, store, config):
 
 
 def thumbnail(photo_id, output, *, store, config):
-    from .exports import export_path
+    from .exports import prepare_export, write_export
     from .thumbnails import stored_preview
 
-    target = export_path(output, config, store, (".jpg", ".jpeg"))
+    target = prepare_export(output, config, store, (".jpg", ".jpeg"))
     with store.read_snapshot():
         data = stored_preview(store.photo(photo_id), store)
         album = store.album()
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_bytes(data)
+    write_export(target, data)
     return {"album": album, "photo_id": photo_id, "output": str(target), "bytes": len(data),
             "original_verification": "not_checked", "preview_integrity": "verified", "model_calls": 0}
 

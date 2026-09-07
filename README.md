@@ -21,7 +21,15 @@ python -m venv .venv
 
 The optional model runtime is narrower: **standard, GIL-enabled CPython 3.14, 64-bit x86-64**, with pinned Windows CPU dependencies. Portable album files do not imply that this runtime supports ARM, other Python versions or every host. See [index setup](photography/references/index.md); do not install into a shared interpreter.
 
-Copy the entire `photography` directory into your host's supported Skill directory as `smart-albums`. Its entry is [photography/SKILL.md](photography/SKILL.md). The host needs local Python execution and access to the selected album and requested files.
+Copy the entire `photography` directory into your host's supported Skill directory as `smart-albums`. Its entry is [photography/SKILL.md](photography/SKILL.md). This directory is the complete distributable Skill: its runtime references, scripts and requirements files are self-contained. Repository `docs` and `tests` are development material, not installation dependencies. Do not copy virtual environments, model caches or album files into the Skill. The host needs local Python execution and access to the selected album and requested files.
+
+The examples below run from a repository checkout. After installation, replace `photography` in script/requirements paths with the absolute installed Skill directory; do not resolve them against the host's working directory. Using the chosen environment's interpreter, verify the installed entry without an album or models:
+
+```text
+python <installed-skill-directory>\scripts\photography.py --help
+```
+
+For OCR/objects, explicitly supply the separate worker's absolute interpreter using `--worker-python` or `SMART_ALBUMS_FEATURE_PYTHON`. Repository-local `.venv-features` discovery is only a checkout convenience, not an installed-directory contract; see the bundled [runtime instructions](photography/references/index.md#feature-runtime-and-assets).
 
 ## Select or create the album file first
 
@@ -234,5 +242,6 @@ python -m unittest discover -s tests -v
 - [Portable-album implementation plan](docs/portable-album-plan.md) (plan text, not live completion status)
 - [Earlier implementation plan](docs/ingestion-index-management-plan.md) (historical; superseded for storage/CLI)
 - [Pending validation and future work](docs/TODO.md)
+- [Code-review follow-up discussion (中文; deferred proposals, not approved capabilities)](docs/code-review-follow-up.zh-CN.md)
 
 Private databases, photos, weights and generated reports are not distributed with the Skill. Pushing this repository does not back up an album or its originals.

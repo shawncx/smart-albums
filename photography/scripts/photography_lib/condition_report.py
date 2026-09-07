@@ -6,7 +6,7 @@ import json
 from uuid import UUID
 
 from .config import PhotographyError
-from .exports import export_path
+from .exports import prepare_export, write_export
 from .management import snapshot_scope
 from .management_report import _preview
 
@@ -72,7 +72,7 @@ def _validate_page(page, store):
 
 
 def condition_report(page, output, *, config, store):
-    target = export_path(output, config, store, (".html",))
+    target = prepare_export(output, config, store, (".html",))
     cards = []
     with store.read_snapshot():
         _validate_page(page, store)
@@ -125,6 +125,5 @@ th,td{text-align:left;vertical-align:top;border:1px solid #dce1d9;padding:8px;ov
 </style></head><body>"""
     document += header + "<main>" + ("".join(cards) or "<p>此页没有匹配结果；请结合缺失索引与部分覆盖判断。</p>") + "</main>"
     document += "<footer><p>下一页游标：" + _text(page.get("next_cursor")) + "</p></footer></body></html>"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(document, encoding="utf-8")
+    write_export(target, document.encode("utf-8"))
     return str(target)

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 from .config import PhotographyError
-from .exports import export_path
+from .exports import prepare_export
 
 
 def add_commands(actions):
@@ -46,9 +46,9 @@ def command(args, store, config):
         raise PhotographyError("INVALID_ARGUMENT", "Unknown condition-query operation.")
 
     # Check every target and input alias before model calls, validation reads or exports.
-    output = export_path(args.output, config, store, (".json",)) if args.output else None
+    output = prepare_export(args.output, config, store, (".json",)) if args.output else None
     html_name = getattr(args, "html", None)
-    html_output = export_path(html_name, config, store, (".html",)) if html_name else None
+    html_output = prepare_export(html_name, config, store, (".html",)) if html_name else None
     sources = ([args.query_file] if action == "query" else
                [args.snapshot, args.decisions_file] if action == "finalize-query" else [args.snapshot])
     _protect_inputs((output, html_output), sources)

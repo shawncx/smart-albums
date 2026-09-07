@@ -6,7 +6,7 @@ from pathlib import Path
 
 from . import management
 from .config import PhotographyError
-from .exports import export_path
+from .exports import prepare_export, write_export
 
 
 def _view_options(parser, *, page=True):
@@ -117,14 +117,15 @@ def add_commands(root_subparsers):
 def _protect_inputs(destinations, sources):
     inputs = [Path(path).expanduser().resolve() for path in sources]
     for destination in destinations:
+        destination = Path(destination) if destination is not None else None
         if destination is not None and any(destination == source or (
                 destination.exists() and source.exists() and destination.samefile(source)) for source in inputs):
             raise PhotographyError("INVALID_ARGUMENT", "Keep input files unchanged; export to a different path.")
 
 
 def _write_json(result, output):
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n", encoding="utf-8")
+    data = (json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False) + "\n").encode("utf-8")
+    write_export(output, data)
 
 
 def _folder_command(args, store, config):
@@ -157,7 +158,7 @@ def _folder_command(args, store, config):
     if action == "organize-date":
         from .date_folders import plan_date_organization
 
-        output = export_path(args.output, config, store, (".json",))
+        output = prepare_export(args.output, config, store, (".json",))
         _protect_inputs([output], [args.ids_file] if args.ids_file else [])
         ids = read_json_file(args.ids_file) if args.ids_file else None
         plan = plan_date_organization(store=store, photo_ids=ids, all_photos=args.all_photos,
@@ -199,8 +200,8 @@ def command(args, store, config):
         raise PhotographyError("INVALID_ARGUMENT", "Semantic search does not accept --after.")
 
     # Reject every unsafe target before query encoding, preview decoding or any export writes.
-    output = export_path(args.output, config, store, (".json",)) if args.output else None
-    html_output = export_path(args.html, config, store, (".html",)) if args.html else None
+    output = prepare_export(args.output, config, store, (".json",)) if args.output else None
+    html_output = prepare_export(args.html, config, store, (".html",)) if args.html else None
     profile = {"store": store, "profile_id": getattr(args, "profile_id", None)}
     scope = {"folder_ids": getattr(args, "folder_ids", None), "folder_match": getattr(args, "folder_match", None)}
     if action == "show-results":

@@ -2,8 +2,11 @@ from contextlib import closing
 from pathlib import Path
 import re
 import shlex
+import shutil
 import sqlite3
+import subprocess
 import sys
+import tempfile
 import unittest
 from urllib.parse import unquote
 
@@ -46,19 +49,86 @@ class SkillContractTests(unittest.TestCase):
                 self.assertNotIn("intfloat/multilingual-e5-small", text)
                 self.assertNotIn("Xenova/multilingual-e5-small", text)
 
-    def test_local_markdown_links_exist(self):
-        documents = [ROOT / "README.md", ROOT / "photography" / "SKILL.md"]
-        documents += list((ROOT / "docs").glob("*.md"))
-        documents += list((ROOT / "photography" / "references").glob("*.md"))
+    def assert_local_markdown_links(self, documents, *, bundle=None):
         for document in documents:
-            for target in re.findall(r"\[[^\]]*\]\(([^)]+)\)", document.read_text(encoding="utf-8")):
+            text = document.read_text(encoding="utf-8")
+            targets = re.findall(r"\[[^\]]*\]\(([^)]+)\)", text)
+            targets += re.findall(r"(?m)^\s{0,3}\[[^\]]+\]:\s*(<[^>\n]+>|\S+)", text)
+            for target in targets:
                 target = target.strip().strip("<>")
                 if target.startswith(("http:", "https:", "mailto:", "#")):
                     continue
                 target = unquote(target.split("#", 1)[0])
                 if target:
                     with self.subTest(document=document.name, target=target):
-                        self.assertTrue((document.parent / target).exists())
+                        resolved = (document.parent / target).resolve()
+                        if bundle is not None:
+                            self.assertTrue(resolved.is_relative_to(bundle), "Link escapes installed Skill")
+                        self.assertTrue(resolved.exists(), f"Missing Markdown target: {resolved}")
+
+    def test_local_markdown_links_exist(self):
+        documents = [ROOT / "README.md", ROOT / "photography" / "SKILL.md"]
+        documents += list((ROOT / "docs").glob("*.md"))
+        documents += list((ROOT / "photography" / "references").glob("*.md"))
+        self.assert_local_markdown_links(documents)
+
+    def test_installed_skill_links_and_help_without_repository_or_models(self):
+        with tempfile.TemporaryDirectory(prefix=".skill-contract-", dir=ROOT) as directory:
+            staging = Path(directory)
+            installed = staging / "host-skills" / "smart-albums"
+            shutil.copytree(ROOT / "photography", installed,
+                            ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+            workspace = staging / "unrelated-workspace"
+            workspace.mkdir()
+            self.assertFalse((installed.parent / "docs").exists())
+            self.assertFalse((installed.parent / ".venv-features").exists())
+            self.assert_local_markdown_links(sorted(installed.rglob("*.md")), bundle=installed.resolve())
+            runtime_reference = (installed / "references" / "index.md").read_text(encoding="utf-8")
+            self.assertIn("absolute path via `--worker-python`", runtime_reference)
+            self.assertIn("SMART_ALBUMS_FEATURE_PYTHON", runtime_reference)
+            self.assertIn("an installed Skill must not rely on its parent's layout", runtime_reference)
+            self.assertIn(r"<skill-directory>\requirements-features.txt", runtime_reference)
+            entrypoint = installed / "scripts" / "photography.py"
+            probe = """
+from pathlib import Path
+import runpy
+import sys
+
+class NoModelImports:
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split(".", 1)[0] in {
+            "torch", "transformers", "rapidocr", "onnxruntime", "cv2", "numpy", "huggingface_hub",
+        }:
+            raise AssertionError("Installed help must not import optional models: " + fullname)
+
+sys.meta_path.insert(0, NoModelImports())
+entrypoint = Path(sys.argv[1])
+sys.path.insert(0, str(entrypoint.parent))
+from photography_lib.cli import parser
+from photography_lib.feature_models import worker_python
+arguments = parser().parse_args([
+    "--database", str(Path.cwd() / "unopened.sqlite"), "index", "setup", "--component", "ocr",
+    "--worker-python", sys.executable,
+])
+assert worker_python(arguments.worker_python) == Path(sys.executable).resolve()
+sys.argv = sys.argv[1:]
+runpy.run_path(str(entrypoint), run_name="__main__")
+"""
+            for command in ([], ["ingestion"], ["index"], ["management"]):
+                with self.subTest(command=command):
+                    result = subprocess.run(
+                        [sys.executable, "-I", "-B", "-c", probe, str(entrypoint), *command, "--help"],
+                        cwd=workspace, capture_output=True, text=True, encoding="utf-8", timeout=30,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("usage:", result.stdout)
+            direct = subprocess.run(
+                [sys.executable, "-E", "-s", "-B", str(entrypoint), "--help"],
+                cwd=workspace, capture_output=True, text=True, encoding="utf-8", timeout=30,
+            )
+            self.assertEqual(direct.returncode, 0, direct.stdout + direct.stderr)
+            self.assertIn("usage:", direct.stdout)
+            self.assertEqual(list(workspace.iterdir()), [])
 
     def test_required_followups_are_explicit(self):
         text = (ROOT / "docs" / "TODO.md").read_text(encoding="utf-8")
@@ -448,6 +518,17 @@ class SkillContractTests(unittest.TestCase):
         text = (ROOT / "docs" / "TODO.md").read_text(encoding="utf-8")
         for token in ("第二阶段 OR 搜索", "代码已实现", "定向集成验收已通过", "未验证", "35.4"):
             self.assertIn(token, text)
+
+    def test_ocr_short_query_guides_do_not_deny_implemented_stage_two_search(self):
+        for document in (ROOT / "photography" / "references" / "index.md",
+                         ROOT / "docs" / "index-design.md"):
+            text = document.read_text(encoding="utf-8")
+            with self.subTest(document=document.name):
+                for token in ("management query", "ocr_contains", "1–2 characters", "3+ characters",
+                              "literal `INSTR`", "trigram FTS5 MATCH"):
+                    self.assertIn(token, text)
+                self.assertNotIn("future short-query path", text)
+                self.assertNotIn("does **not** implement OCR/OR search now", text)
 
     def test_stage_two_skill_uses_only_numeric_evidence_not_private_matrices_or_images(self):
         skill = (ROOT / "photography" / "SKILL.md").read_text(encoding="utf-8")

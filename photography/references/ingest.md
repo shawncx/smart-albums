@@ -103,4 +103,4 @@ Only schema 10/application ID `0x53414C42` albums with 37 registered tables are 
 
 Use `management backup --output <new-file>` for a consistent SQLite snapshot; it includes saved previews/embeddings, feature results/prototypes and folder memberships, not originals or weights. Stop operations before moving/cloud-syncing the local album, and use one device writer at a time.
 
-Historical folder regressions do not validate stage-one features or real-model performance. See [index design](../../docs/index-design.md) and [validation status and pending work](../../docs/TODO.md); claim only recorded verification, not success inferred from synthetic-test or download authorization.
+See the bundled [storage summary](library.md#storage-summary). Claim only recorded verification, not real-model quality/performance or successful execution inferred from synthetic-test or download authorization.

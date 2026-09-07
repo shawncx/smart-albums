@@ -7,7 +7,7 @@ import html
 import json
 
 from .config import PhotographyError
-from .exports import export_path
+from .exports import prepare_export, write_export
 from .management import snapshot_scope, validate_snapshot_album
 from .source_paths import photo_filename
 
@@ -43,7 +43,7 @@ def _preview(item, store):
 
 
 def management_report(snapshot, output, *, config, store):
-    target = export_path(output, config, store, (".html",))
+    target = prepare_export(output, config, store, (".html",))
     cards = []
     with store.read_snapshot():
         validate_snapshot_album(snapshot, store)
@@ -115,6 +115,5 @@ pre{white-space:pre-wrap;overflow-wrap:anywhere;font-size:12px}.preview-error{pa
     page += header + "<main>" + ("".join(cards) or empty) + "</main>"
     page += "<footer><details><summary>完整 JSON 快照</summary><pre>" + _json(snapshot)
     page += "</pre></details></footer></body></html>"
-    target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(page, encoding="utf-8")
+    write_export(target, page.encode("utf-8"))
     return str(target)

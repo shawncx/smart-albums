@@ -218,12 +218,15 @@ def normalize_query(raw, *, store):
         _require(cid not in seen, "Condition IDs must be unique, even for identical predicates.")
         seen.add(cid)
         condition = _condition(item, store, cache)
-        identity = json.dumps({key: value for key, value in condition.items() if key != "id"},
+        identity = json.dumps({key: value for key, value in condition.items() if key not in ("id", "scoring")},
                               sort_keys=True, ensure_ascii=False, allow_nan=False)
         if identity not in identities:
             canonical.append(condition)
-            identities[identity] = cid
-        aliases[cid] = identities[identity]
+            identities[identity] = condition
+        first = identities[identity]
+        _require(first["scoring"] == condition["scoring"],
+                 "Identical predicates must use the same scoring policy.")
+        aliases[cid] = first["id"]
     return {"query": {"schema": SCHEMA, "operator": "or", "scope": _scope(raw.get("scope", {})),
                       "semantic_candidates": candidates, "review_page_size": page_size,
                       "random_seed": seed, "conditions": canonical}, "aliases": aliases}

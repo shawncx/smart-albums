@@ -89,6 +89,58 @@ def _choose(path, records, database_path):
     return old
 
 
+class _PhotoLocations:
+    def __init__(self, store, records):
+        self.store = store
+        self._rebuild(records)
+
+    def _rebuild(self, records):
+        self.by_path, self.by_id, self.errors = {}, {}, {}
+        for record in records:
+            self._update(record)
+        self.token = self.store.photo_location_token()
+
+    def _update(self, record):
+        pid = record["photo_id"]
+        for key in self.by_id.pop(pid, ()):
+            self.by_path[key].discard(pid)
+            if not self.by_path[key]:
+                del self.by_path[key]
+        self.errors.pop(pid, None)
+        try:
+            candidates = (absolute_candidate(record["original_absolute_path"]),
+                          relative_candidate(record["original_relative_path"], self.store.database_path))
+            keys = {path_identity(candidate) for candidate in candidates if candidate is not None}
+        except PhotographyError as exc:
+            self.errors[pid] = exc
+            return
+        self.by_id[pid] = keys
+        for key in keys:
+            self.by_path.setdefault(key, set()).add(pid)
+
+    def refresh(self):
+        # Normalized paths cannot use the raw-path indexes (case, '..', album moves).
+        # Rebuild only after unaccounted writes; fetch matching photos by primary key.
+        token, changed_ids = self.store.photo_location_changes(self.token)
+        if changed_ids is None:
+            self._rebuild(self.store.photo_locations())
+        else:
+            for record in self.store.photo_locations(changed_ids) if changed_ids else ():
+                self._update(record)
+            self.token = token
+
+    def candidates(self, path):
+        self.refresh()
+        if self.errors:
+            raise next(iter(self.errors.values()))
+        return [self.store.photo(pid) for pid in sorted(self.by_path.get(path_identity(path), ()))]
+
+    def accepted(self, token, photo=None):
+        if photo is not None:
+            self._update(photo)
+        self.token = token
+
+
 def _identity(photo):
     if photo is None:
         return None
@@ -173,12 +225,16 @@ def _scan(root, config, store):
     root_relative, root_warning = relative_original_path(root, config.database_path)
     with store.read_snapshot():
         initial = store.photos()
+        locations = _PhotoLocations(store, initial)
     result = {"scan_id": scan_id, "album": store.album(), "source_root": str(root), "status": "completed",
               "scanned": 0, "added": 0, "updated": 0, "restored": 0, "unchanged": 0,
               "missing": 0, "failed": 0, "successful_photo_ids": [], "changed_photo_ids": [],
               "errors": [], "warnings": [root_warning] if root_warning else [], "source_errors": []}
     with store.transaction():
+        locations.refresh()
         store.start_scan(scan_id, str(root), root_relative)
+        token = store.photo_location_token()
+    locations.accepted(token)
     seen = set()
     fatal = None
     protected = [config.database_path]
@@ -191,13 +247,13 @@ def _scan(root, config, store):
             result["scanned"] += 1
             try:
                 with store.read_snapshot():
-                    records = store.photos()
+                    records = locations.candidates(path)
                 old = _choose(path, records, config.database_path)
                 if old:
                     seen.add(old["photo_id"])
                 photo, outcome, changed, thumbnail, warning, observed = _prepare(path, old, config, store)
                 with store.transaction():
-                    current = _candidates(path, store.photos(), config.database_path)
+                    current = _candidates(path, locations.candidates(path), config.database_path)
                     if (current is None) != (old is None) or (current and (
                             current["photo_id"] != old["photo_id"] or _identity(current) != _identity(old))):
                         raise PhotographyError("PHOTO_PATH_CHANGED", "Another operation changed this path or photo while reading it; retry.")
@@ -207,6 +263,8 @@ def _scan(root, config, store):
                     if thumbnail is not None:
                         store.put_thumbnail(photo, thumbnail)
                     store.event(scan_id, outcome, photo["photo_id"], str(path))
+                    token = store.photo_location_token()
+                locations.accepted(token, photo)
                 seen.add(photo["photo_id"])
                 result[outcome] += 1
                 result["successful_photo_ids"].append(photo["photo_id"])
@@ -220,13 +278,18 @@ def _scan(root, config, store):
                 result["failed"] += 1
                 result["errors"].append(error)
                 with store.transaction():
+                    locations.refresh()
+                    updated = None
                     if old and error["code"] not in ("PHOTO_PATH_CHANGED", "PHOTO_PATH_CONFLICT"):
                         current = store.photo(old["photo_id"])
                         if _identity(current) == _identity(old):
-                            store.put_photo({**current, "ingest_state": "error", "last_ingest_error": error, "updated_at": _now()})
+                            updated = {**current, "ingest_state": "error", "last_ingest_error": error, "updated_at": _now()}
+                            store.put_photo(updated)
                         else:
                             error["state_update"] = "not_applied_due_to_concurrent_change"
                     store.event(scan_id, "failed", error["photo_id"], str(path), error)
+                    token = store.photo_location_token()
+                locations.accepted(token, updated)
         final = root.stat()
         if (root_info.st_dev, root_info.st_ino) != (final.st_dev, final.st_ino):
             raise OSError("The source directory changed during enumeration.")

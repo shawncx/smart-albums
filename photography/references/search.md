@@ -51,6 +51,8 @@ management show-results <candidates.json> --ids-file <selected.json> --html <res
 
 The helper validates the album, candidate membership and current selected input/result identities, preserves saved scores/ranks/gaps verbatim (including the gap to the next candidate outside returned top-K), and runs no new query or image encoding. It does not recompute gaps from the selection. It accepts `[]` for no suitable candidates. The local report contains only selected images for the user to view; give the user its link without feeding its image contents back to the agent. Keep raw candidates for optional diagnostics, not default all-photo display. A top-K subset cannot establish exhaustive matches across the selected scope.
 
+Semantic candidates and selected outputs require `vector_hash` in each result, while retaining `album-snapshot-v2`. Snapshots lacking this hash are rejected, not silently accepted or upgraded. Selection validates the saved hash against the current vector as well as result/input identity. Repairing the same result ID to a different valid vector therefore invalidates old selection and `folders add --search-snapshot`; rerun the search instead of copying a new hash onto old scores. This validation does not add append-only result revisions or repair historical scene dependencies.
+
 For a requested one-time addition to an explicit destination, use `management folders add <folder-id> --ids-file <selected.json> --search-snapshot <candidates.json>`. It reuses `management.select_search_results` validation, performs no new query or image encoding and does not remove source memberships. Never default to all top-K. Saved EXIF date organization is separately authorized deterministic grouping, not semantic evidence; it does not permit image/HTML-pixel inspection.
 
 ## Stage 2 OR condition workflow
@@ -89,7 +91,7 @@ Example `multi-condition-query-v1` input; placeholders must be replaced with dis
 }
 ```
 
-Only top-level `or` is supported; no top-level AND or RRF. IDs are unique, stable nonblank text. Identical normalized predicates deduplicate to the first ID and return an `aliases` mapping, so repeats never inflate match counts. Missing profiles resolve the relevant saved default once and freeze an explicit ID; missing configuration is an error, not permission to change defaults. Query values and unknown fields are strictly validated.
+Only top-level `or` is supported; no top-level AND or RRF. IDs are unique, stable nonblank text. Predicate identity excludes `id` and `scoring`, but retains the normalized kind, profile and filter parameters. Identical normalized predicates with the same resolved scoring deduplicate to the first ID and return an `aliases` mapping, including default versus explicitly identical scoring. Conflicting `exact`/`graded` scoring for the same predicate is rejected explicitly, not counted twice or silently merged. Different thresholds remain distinct predicates. Missing profiles resolve the relevant saved default once and freeze an explicit ID; missing configuration is an error, not permission to change defaults. Query values and unknown fields are strictly validated.
 
 Scope defaults to the whole album (`folder_ids: []`, `match: null`); multiple distinct folders require `union` or `intersection`. Names/membership are captured before candidate retrieval. `semantic_candidates` defaults to 10 per semantic condition, or explicit `"all"`; `review_page_size` defaults to 100, range 1–1000. Omit/null `random_seed` to generate a saved seed; supply a bounded string for explicit reproducibility.
 
@@ -156,4 +158,4 @@ These JSON/HTML exports have no selection controls or membership writes; there i
 
 Only schema 10 with 37 registered tables is supported: 32 ordinary, one external-content FTS5 virtual table and four explicitly registered shadows (excluding internal `sqlite_sequence`), including unchanged `virtual_folders` and `virtual_folder_photos`; v1–v9 databases are rejected unchanged with no migration.
 
-Historical folder regressions do not validate stage-one features; see [validation status](../../docs/TODO.md). No real-model performance, retrieval quality, latency, memory or disconnected-runtime claim follows from synthetic tests or authorization alone.
+No real-model performance, retrieval quality, latency, memory or disconnected-runtime claim follows from synthetic tests or authorization alone.

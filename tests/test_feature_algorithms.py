@@ -264,6 +264,70 @@ class PayloadTests(unittest.TestCase):
         self.assertEqual(raised.exception.code, "FEATURE_PAYLOAD_INVALID")
 
 
+class ProviderExecutionTests(unittest.TestCase):
+    def test_unknown_and_wrong_providers_remain_readable_but_cannot_compute(self):
+        data = preview(Image.new("RGB", (9, 8), "red"))
+        scene = scene_profile()
+        prototypes = make_scene_prototypes(scene, FakeEncoder())
+        cases = [
+            (default_profile("color"), lambda p: compute_color(data, p), "pillow-dhash-v1"),
+            (default_profile("perceptual_hash"), lambda p: compute_hash(data, p), "pillow-color-v1"),
+            (default_profile("composition", dependency_profile_id="fixture"),
+             lambda p: compute_composition(object_result(), p), "embedding-cosine-v1"),
+            (scene, lambda p: compute_scene([1, 0, 0], prototypes, p), "box-geometry-v1"),
+        ]
+        for profile, compute, wrong_provider in cases:
+            payload = compute(profile)
+            for provider in ("unknown-provider-v99", wrong_provider):
+                stored = copy.deepcopy(profile)
+                stored["provider"] = provider
+                with self.subTest(component=profile["component"], provider=provider):
+                    self.assertNotEqual(profile_identity(stored), profile_identity(profile))
+                    self.assertEqual(validate_payload(stored, payload), payload)
+                    if stored["component"] == "scene":
+                        self.assertEqual(validate_scene_prototypes(stored, prototypes), prototypes)
+                    with self.assertRaises(PhotographyError) as caught:
+                        compute(stored)
+                    self.assertEqual(caught.exception.code, "FEATURE_PROVIDER_UNSUPPORTED")
+
+    def test_unknown_scene_provider_cannot_encode_prototypes(self):
+        for provider in ("unknown-provider-v99", "box-geometry-v1"):
+            profile, encoder = scene_profile(), FakeEncoder()
+            profile["provider"] = provider
+            with self.subTest(provider=provider), self.assertRaises(PhotographyError) as caught:
+                make_scene_prototypes(profile, encoder)
+            self.assertEqual(caught.exception.code, "FEATURE_PROVIDER_UNSUPPORTED")
+            self.assertEqual(encoder.calls, [])
+
+    def test_workflow_rejects_unknown_provider_without_persisting_result_provenance(self):
+        from functools import partial
+        import tempfile
+        from unittest.mock import patch
+        from tests.test_feature_index import FeatureIndexTests
+        from photography_lib import feature_index
+
+        state = PROJECT / ".photography-state"
+        state.mkdir(exist_ok=True)
+        fixture = FeatureIndexTests()
+        self.addCleanup(fixture.doCleanups)
+        with patch("tempfile.TemporaryDirectory", partial(tempfile.TemporaryDirectory, dir=state)):
+            fixture.setUp()
+        for component in ("color", "perceptual_hash"):
+            with self.subTest(component=component):
+                profile = default_profile(component)
+                profile["provider"] = "unknown-provider-v99"
+                profile_id = fixture.store.put_feature_profile(profile)
+                pid = fixture.ids[0]
+                result = fixture.execute(fixture.plan(profile, [pid]))
+                self.assertEqual(result["status"], "failed")
+                self.assertEqual(result["items"][0]["error"]["code"], "FEATURE_PROVIDER_UNSUPPORTED")
+                self.assertEqual(result["model_calls"], 0)
+                self.assertFalse(fixture.store.has_feature_results(pid, profile_id))
+                self.assertEqual(fixture.store.feature_history(pid, profile_id), [])
+                current = feature_index.current_result(pid, store=fixture.store, profile=profile)
+                self.assertEqual(current["status"], "missing")
+
+
 class ColorTests(unittest.TestCase):
     def test_uniform_primary_colors_and_achromatic_images(self):
         profile = default_profile("color")

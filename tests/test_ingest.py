@@ -68,6 +68,201 @@ class IngestionTests(unittest.TestCase):
         self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), before)
         self.assertEqual(repeated["index_prompt"]["photo_ids"], first["successful_photo_ids"])
 
+    def test_scan_lookup_work_is_linear_for_new_and_existing_photos(self):
+        for size in (20, 40):
+            source = self.base / f"scale-{size}"
+            source.mkdir()
+            data = self.image(size=(16, 12)).read_bytes()
+            for index in range(size):
+                (source / f"{index:03}.jpg").write_bytes(data)
+            config = Config(self.base / f"scale-{size}.sqlite", model_cache_root=self.base / "cache")
+            with SQLiteStorage.create(config.database_path) as store:
+                for repeat in (False, True):
+                    with self.subTest(size=size, repeat=repeat), \
+                         patch.object(store, "photos", wraps=store.photos) as full_reads, \
+                         patch.object(store, "photo_locations", wraps=store.photo_locations) as refreshes, \
+                         patch.object(store, "_photo", wraps=store._photo) as materialized, \
+                         patch.object(ingest_module, "_candidates", wraps=ingest_module._candidates) as candidates:
+                        result = ingestion(source, config=config, storage=store)
+                        self.assertEqual(result["unchanged" if repeat else "added"], size)
+                        self.assertEqual(full_reads.call_count, 1)
+                        self.assertEqual(refreshes.call_count, 0)
+                        self.assertEqual(materialized.call_count, 3 * size if repeat else 0)
+                        self.assertEqual(sum(len(call.args[1]) for call in candidates.call_args_list),
+                                         2 * size if repeat else 0)
+
+    def test_concurrent_insert_of_normalized_relative_alias_does_not_duplicate_identity(self):
+        self.image()
+        prepare = ingest_module._prepare
+        with SQLiteStorage.open(self.database, writable=True) as store, \
+             SQLiteStorage.open(self.database, writable=True) as writer:
+            def insert_after_read(*args):
+                result = prepare(*args)
+                photo, unused, unused_changed, thumbnail, *unused_rest = result
+                with writer.transaction():
+                    inserted = {**photo, "photo_id": "concurrent-photo",
+                                "original_absolute_path": str(self.base / "no-longer-here.jpg"),
+                                "original_relative_path": "photos/../photos/./photo.jpg"}
+                    writer.put_photo(inserted)
+                    writer.put_thumbnail(inserted, thumbnail)
+                return result
+
+            with patch.object(ingest_module, "_prepare", side_effect=insert_after_read):
+                result = ingestion(self.source, config=self.config, storage=store)
+            self.assertEqual((result["added"], result["failed"]), (0, 1))
+            self.assertEqual(result["errors"][0]["code"], "PHOTO_PATH_CHANGED")
+            self.assertEqual([row["photo_id"] for row in store.photos()], ["concurrent-photo"])
+            repeated = ingestion(self.source, config=self.config, storage=store)
+            self.assertEqual(repeated["successful_photo_ids"], ["concurrent-photo"])
+
+    def test_same_connection_interleaved_writes_only_refresh_touched_locations(self):
+        for size in (20, 40):
+            source = self.base / f"interleaved-{size}"
+            source.mkdir()
+            data = self.image(size=(16, 12)).read_bytes()
+            for index in range(size):
+                (source / f"{index:03}.jpg").write_bytes(data)
+            config = Config(self.base / f"interleaved-{size}.sqlite", model_cache_root=self.base / "cache")
+            with SQLiteStorage.create(config.database_path) as store:
+                ingestion(source, config=config, storage=store)
+                unrelated = {**store.photos()[0], "photo_id": "unrelated",
+                             "original_absolute_path": str(self.base / "elsewhere.jpg"),
+                             "original_relative_path": None}
+                store.put_photo(unrelated)
+                prepare = ingest_module._prepare
+
+                def unrelated_writes(*args):
+                    prepared = prepare(*args)
+                    scan = store.db.execute("SELECT scan_id FROM scans WHERE status='running'").fetchone()[0]
+                    store.event(scan, "diagnostic", None, str(source))
+                    store.put_photo({**unrelated, "original_status": "not_checked"})
+                    return prepared
+
+                with self.subTest(size=size), patch.object(ingest_module, "_prepare", side_effect=unrelated_writes), \
+                     patch.object(store, "photos", wraps=store.photos) as full_reads, \
+                     patch.object(store, "photo_locations", wraps=store.photo_locations) as locations:
+                    result = ingestion(source, config=config, storage=store)
+                self.assertEqual((result["unchanged"], result["failed"]), (size, 0))
+                self.assertEqual(full_reads.call_count, 1)
+                self.assertEqual(locations.call_count, size)
+                self.assertTrue(all(call.args == ({"unrelated"},) for call in locations.call_args_list))
+
+    def test_external_insert_and_relink_batch_reconciles_once(self):
+        for size in (20, 40):
+            source = self.base / f"external-{size}"
+            source.mkdir()
+            data = self.image(size=(16, 12)).read_bytes()
+            for index in range(size):
+                (source / f"{index:03}.jpg").write_bytes(data)
+            config = Config(self.base / f"external-{size}.sqlite", model_cache_root=self.base / "cache")
+            with SQLiteStorage.create(config.database_path) as store, \
+                 SQLiteStorage.open(config.database_path, writable=True) as writer:
+                ingestion(source, config=config, storage=store)
+                records = store.photos()
+                for old in records:
+                    writer.put_photo({**old, "original_absolute_path": str(self.base / old["photo_id"]),
+                                      "original_relative_path": None})
+                walk = ingest_module._walk
+
+                def external_batch(*args):
+                    with writer.transaction():
+                        for old in records:
+                            writer.put_photo(old)
+                        template = records[0]
+                        for index in range(size):
+                            path = source / f"new-{index:03}.jpg"
+                            path.write_bytes(data)
+                            photo = {**template, "photo_id": f"external-{index:03}",
+                                     "original_absolute_path": str(self.base / "absent" / path.name),
+                                     "original_relative_path": f"{source.name}/../{source.name}/./{path.name}"}
+                            writer.put_photo(photo)
+                            writer.put_thumbnail(photo, data)
+                    yield from walk(*args)
+
+                with self.subTest(size=size), patch.object(ingest_module, "_walk", side_effect=external_batch), \
+                     patch.object(store, "photos", wraps=store.photos) as full_reads, \
+                     patch.object(store, "photo_locations", wraps=store.photo_locations) as locations:
+                    result = ingestion(source, config=config, storage=store)
+                self.assertEqual((result["added"], result["unchanged"], result["failed"]), (0, 2 * size, 0))
+                self.assertEqual(full_reads.call_count, 1)
+                self.assertEqual(locations.call_count, 1)
+                self.assertEqual(locations.call_args.args, ())
+                self.assertEqual(len(store.photos()), 2 * size)
+
+    def test_untracked_same_connection_relink_cannot_hide_behind_scan_writes(self):
+        self.image()
+        ingestion(self.source, config=self.config)
+        prepare = ingest_module._prepare
+        with SQLiteStorage.open(self.database, writable=True) as store:
+            old = store.photos()[0]
+            store.put_photo({**old, "original_absolute_path": str(self.base / "elsewhere.jpg"),
+                             "original_relative_path": None})
+
+            def relink_after_read(*args):
+                prepared = prepare(*args)
+                store.db.execute("UPDATE photos SET original_relative_path='photos/../photos/photo.jpg' WHERE photo_id=?",
+                                 (old["photo_id"],))
+                scan = store.db.execute("SELECT scan_id FROM scans WHERE status='running'").fetchone()[0]
+                store.event(scan, "diagnostic", None, str(self.source))
+                return prepared
+
+            with patch.object(ingest_module, "_prepare", side_effect=relink_after_read):
+                result = ingestion(self.source, config=self.config, storage=store)
+            self.assertEqual(result["errors"][0]["code"], "PHOTO_PATH_CHANGED")
+            self.assertEqual([photo["photo_id"] for photo in store.photos()], [old["photo_id"]])
+
+    def test_lookup_refreshes_relinks_between_files_and_preserves_conflicts(self):
+        first = self.image("a.jpg")
+        second = self.image("b.jpg")
+        ingestion(self.source, config=self.config)
+        with SQLiteStorage.open(self.database, writable=True) as store, \
+             SQLiteStorage.open(self.database, writable=True) as writer:
+            records = {Path(row["original_absolute_path"]).name: row for row in store.photos()}
+
+            def relink_between_files(*args):
+                yield first
+                with writer.transaction():
+                    writer.put_photo({**records["a.jpg"], "original_absolute_path": str(second.parent / "." / second.name),
+                                      "original_relative_path": "photos/../photos/b.jpg"})
+                yield second
+
+            with patch.object(ingest_module, "_walk", side_effect=relink_between_files), \
+                 patch.object(store, "photo_locations", wraps=store.photo_locations) as refreshes:
+                result = ingestion(self.source, config=self.config, storage=store)
+            self.assertEqual((result["unchanged"], result["failed"], result["added"]), (1, 1, 0))
+            self.assertEqual(result["errors"][0]["code"], "PHOTO_PATH_CONFLICT")
+            self.assertEqual(refreshes.call_count, 1)
+            self.assertEqual(len(store.photos()), 2)
+
+    def test_concurrent_relink_removing_both_aliases_is_not_overwritten(self):
+        self.image()
+        ingestion(self.source, config=self.config)
+        prepare = ingest_module._prepare
+        with SQLiteStorage.open(self.database, writable=True) as writer:
+            old = writer.photos()[0]
+            relocated = {**old, "original_absolute_path": str(self.base / "elsewhere.jpg"),
+                         "original_relative_path": "elsewhere.jpg"}
+
+            def relink_after_read(*args):
+                prepared = prepare(*args)
+                writer.put_photo(relocated)
+                return prepared
+
+            with patch.object(ingest_module, "_prepare", side_effect=relink_after_read):
+                result = ingestion(self.source, config=self.config)
+            self.assertEqual(result["errors"][0]["code"], "PHOTO_PATH_CHANGED")
+            self.assertEqual(writer.photo(old["photo_id"])["original_absolute_path"], relocated["original_absolute_path"])
+            self.assertEqual(len(writer.photos()), 1)
+
+    def test_arbitrary_rename_does_not_reuse_content_identity(self):
+        path = self.image()
+        ingestion(self.source, config=self.config)
+        old = self.records()[0]
+        path.rename(self.source / "renamed.jpg")
+        result = ingestion(self.source, config=self.config)
+        self.assertEqual((result["added"], result["missing"]), (1, 1))
+        self.assertNotEqual(result["successful_photo_ids"], [old["photo_id"]])
+
     def test_changed_photo_keeps_id_and_reports_new_input(self):
         path = self.image()
         ingestion(self.source, config=self.config)

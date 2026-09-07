@@ -80,7 +80,7 @@ FTS is registered explicitly, not by arbitrary suffix acceptance:
 | `image_ocr_fts_docsize` | FTS shadow |
 | `image_ocr_fts_config` | FTS shadow |
 
-Format checks validate the exact registered table/column/schema relationships, including the virtual-table configuration and its legitimate shadows. OCR documents are authoritative; transactional maintenance and explicit `index rebuild-fts --confirm` rebuild derived normalized text without models or original reads. Read-only open/result/search never repairs it. Trigram MATCH does not support substrings shorter than three characters; full normalized text is retained for a future short-query path, not a stage-one public OCR query.
+Format checks validate the exact registered table/column/schema relationships, including the virtual-table configuration and its legitimate shadows. OCR documents are authoritative; transactional maintenance and explicit `index rebuild-fts --confirm` rebuild derived normalized text without models or original reads. Read-only open/result/search never repairs it. Stage 2 `management query` already supports `ocr_contains`: normalized queries of 1–2 characters use literal `INSTR` over saved documents; queries of 3+ characters use trigram FTS5 MATCH plus a literal `INSTR` check, restricted to validated saved results. Neither path performs OCR inference.
 
 There are no `libraries`, `albums`, `album_photos`, `image_index_*`, old analysis/text-vector tables, compatibility views or empty `technical_*` placeholders. An empty claims table remains necessary. Source directories are scan scope, not another resource to select.
 

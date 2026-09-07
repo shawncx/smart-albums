@@ -329,10 +329,13 @@ class FeatureQueryTests(unittest.TestCase):
         self.color("b", .8)
         self.color("c", 0)
         base = {"kind": "color_fraction", "color": "blue", "minimum": .2}
-        matrix = self.query({"id": "graded", **base}, {"id": "exact", **base, "scoring": "exact"})
+        matrix = self.query({"id": "graded", **base})
+        exact = self.query({"id": "exact", **base, "scoring": "exact"})
         self.assertEqual(matrix["a"]["graded"]["raw_score"], .2)
         self.assertEqual(matrix["b"]["graded"]["raw_score"], .8)
-        self.assertEqual(matrix["a"]["exact"]["raw_score"], matrix["b"]["exact"]["raw_score"])
+        self.assertEqual(exact["a"]["exact"]["raw_score"], exact["b"]["exact"]["raw_score"])
+        with self.assertRaisesRegex(PhotographyError, "same scoring policy"):
+            self.query({"id": "graded", **base}, {"id": "exact", **base, "scoring": "exact"})
         self.assertEqual(matrix["c"]["graded"]["status"], "not_matched")
         self.assertEqual(matrix["c"]["graded"]["raw_score"], 0)
         self.assertEqual(matrix["a"]["graded"]["evidence"]["rule_version"], "hsv-palette-v1")
@@ -369,10 +372,13 @@ class FeatureQueryTests(unittest.TestCase):
         self.scene("b", .8)
         self.scene("c", -.4)
         base = {"kind": "scene", "scene_id": "beach", "minimum": .2}
-        matrix = self.query({"id": "grade", **base}, {"id": "exact", **base, "scoring": "exact"})
+        matrix = self.query({"id": "grade", **base})
+        exact = self.query({"id": "exact", **base, "scoring": "exact"})
         self.assertEqual(matrix["a"]["grade"]["raw_score"], .2)
         self.assertEqual(matrix["b"]["grade"]["raw_score"], .8)
-        self.assertEqual(matrix["b"]["exact"]["raw_score"], 1)
+        self.assertEqual(exact["b"]["exact"]["raw_score"], 1)
+        with self.assertRaisesRegex(PhotographyError, "same scoring policy"):
+            self.query({"id": "grade", **base}, {"id": "exact", **base, "scoring": "exact"})
         self.assertEqual(matrix["c"]["grade"]["status"], "not_matched")
         for changes in ({"scene_id": "unknown"}, {"minimum": None}, {"minimum": -1.01}, {"minimum": True}):
             with self.subTest(changes=changes), self.assertRaises(PhotographyError):

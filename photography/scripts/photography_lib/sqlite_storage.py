@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import stat
+from collections import deque
 from contextlib import closing, contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -371,6 +372,48 @@ class SQLiteStorage(ImageEmbeddingStorage, ImageFeatureStorage, VirtualFolderSto
     def photos(self) -> list[dict]:
         return [self._photo(row) for row in self.db.execute("SELECT * FROM photos ORDER BY photo_id")]
 
+    def photo_locations(self, photo_ids: set[str] | None = None) -> list[dict]:
+        fields = "photo_id,original_absolute_path,original_relative_path"
+        if photo_ids is None:
+            return [dict(row) for row in self.db.execute(f"SELECT {fields} FROM photos")]
+        return [dict(row) for pid in photo_ids for row in self.db.execute(
+            f"SELECT {fields} FROM photos WHERE photo_id=?", (pid,))]
+
+    def _record_photo_changes(self, before, photo_id=None):
+        # Known writes can reconcile by primary key. Unknown SQL and other
+        # connections must still invalidate normalized-path lookups conservatively.
+        if not hasattr(self, "_photo_changes"):
+            self._photo_changes = deque(maxlen=512)
+            self._photo_revision = self._unknown_photo_revision = 0
+            self._known_photo_total = before
+        if self._known_photo_total < before:
+            self._unknown_photo_revision += 1
+        self._known_photo_total = self.db.total_changes
+        if photo_id is not None:
+            self._photo_revision += 1
+            self._photo_changes.append((self._photo_revision, photo_id))
+
+    def photo_location_token(self) -> tuple:
+        self._record_photo_changes(self.db.total_changes)
+        return (*self.change_token()[:2], self._unknown_photo_revision, self._photo_revision)
+
+    def photo_location_changes(self, previous) -> tuple:
+        current = self.photo_location_token()
+        if (previous[:3] != current[:3] or
+                self._photo_changes and previous[3] < self._photo_changes[0][0] - 1):
+            return current, None
+        changed = set()
+        for revision, pid in reversed(self._photo_changes):
+            if revision <= previous[3]:
+                break
+            changed.add(pid)
+        return current, changed
+
+    def change_token(self) -> tuple:
+        """Observe changes in the current snapshot, including writes on this connection."""
+        return (self.db.execute("PRAGMA data_version").fetchone()[0],
+                self.db.execute("PRAGMA schema_version").fetchone()[0], self.db.total_changes)
+
     def put_photo(self, photo: dict) -> None:
         self.assert_writable()
         missing = [field for field in PHOTO_REQUIRED_FIELDS if field not in photo or photo[field] is None]
@@ -390,14 +433,17 @@ class SQLiteStorage(ImageEmbeddingStorage, ImageFeatureStorage, VirtualFolderSto
         columns = ",".join(values)
         parameters = ",".join(":" + field for field in values)
         updates = ",".join(f"{field}=excluded.{field}" for field in values if field != "photo_id")
+        before = self.db.total_changes
         self.db.execute(
             f"INSERT INTO photos ({columns}) VALUES ({parameters}) ON CONFLICT(photo_id) DO UPDATE SET {updates}",
             values,
         )
+        self._record_photo_changes(before, photo["photo_id"])
 
     def put_thumbnail(self, photo: dict, data: bytes) -> None:
         self.assert_writable()
         width, height = validate_preview(data)
+        before = self.db.total_changes
         self.db.execute("""INSERT INTO thumbnails VALUES (?,?,?,?,?,?,?,?,?,?)
             ON CONFLICT(photo_id) DO UPDATE SET content_version=excluded.content_version,
             profile=excluded.profile,image_hash=excluded.image_hash,mime_type=excluded.mime_type,
@@ -405,6 +451,7 @@ class SQLiteStorage(ImageEmbeddingStorage, ImageFeatureStorage, VirtualFolderSto
             size_bytes=excluded.size_bytes,data=excluded.data""",
             (photo["photo_id"], photo["content_version"], photo["thumbnail_profile"],
              hashlib.sha256(data).hexdigest(), "image/jpeg", width, height, now(), len(data), data))
+        self._record_photo_changes(before)
 
     def thumbnail(self, photo_id: str, *, include_data: bool = True) -> dict:
         fields = "*" if include_data else "photo_id,content_version,profile,image_hash,mime_type,width,height,created_at,size_bytes"
@@ -415,19 +462,25 @@ class SQLiteStorage(ImageEmbeddingStorage, ImageFeatureStorage, VirtualFolderSto
 
     def start_scan(self, scan_id: str, source_absolute_path: str, source_relative_path: str | None = None) -> None:
         self.assert_writable()
+        before = self.db.total_changes
         self.db.execute("""INSERT INTO scans
             (scan_id,source_absolute_path,source_relative_path,started_at,status) VALUES (?,?,?,?,'running')""",
             (scan_id, source_absolute_path, source_relative_path, now()))
+        self._record_photo_changes(before)
 
     def event(self, scan_id: str, kind: str, photo_id: str | None, path: str, error: dict | None = None) -> None:
         self.assert_writable()
+        before = self.db.total_changes
         self.db.execute("INSERT INTO scan_events(scan_id,kind,photo_id,path,error_json) VALUES (?,?,?,?,?)",
             (scan_id, kind, photo_id, path, json.dumps(error, ensure_ascii=False) if error is not None else None))
+        self._record_photo_changes(before)
 
     def finish_scan(self, scan_id: str, result: dict) -> None:
         self.assert_writable()
+        before = self.db.total_changes
         cursor = self.db.execute("UPDATE scans SET completed_at=?,status=?,result_json=? WHERE scan_id=?",
             (now(), result["status"], json.dumps(result, ensure_ascii=False), scan_id))
+        self._record_photo_changes(before)
         if cursor.rowcount != 1:
             raise PhotographyError("SCAN_NOT_FOUND", "Scan does not exist in this album.")
 

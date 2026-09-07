@@ -3,6 +3,8 @@ from __future__ import annotations
 import argparse
 import builtins
 from copy import deepcopy
+import ctypes
+import errno
 import hashlib
 import io
 import json
@@ -12,7 +14,7 @@ import shutil
 import sqlite3
 import sys
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 from uuid import UUID, uuid4
 
 from PIL import Image
@@ -20,7 +22,7 @@ from PIL import Image
 PROJECT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(PROJECT / "photography" / "scripts"))
 
-from photography_lib import management, management_cli, source_paths, virtual_folders
+from photography_lib import exports, image_embedding, management, management_cli, source_paths, virtual_folders
 from photography_lib.config import Config, PhotographyError
 from photography_lib.exports import export_path
 from photography_lib.image_embedding_profiles import default_model_dir
@@ -362,6 +364,51 @@ class ManagementTests(unittest.TestCase):
         snapshot = self.search()
         self.store.put_thumbnail(self.store.photo(self.ids[0]), self.jpeg((250, 240, 230)))
         self.assert_error("SEARCH_SNAPSHOT_STALE", management.select_search_results, snapshot, [self.ids[0]], store=self.store)
+
+    def test_repaired_vector_invalidates_old_selection_and_folder_add(self):
+        self.configure()
+        pid = self.ids[0]
+        result_id = self.seed(pid)
+        snapshot = self.search()
+        self.assertEqual(snapshot["results"][0]["vector_hash"], hashlib.sha256(pack_vector((1., 0., 0.), 3)).hexdigest())
+        self.store.db.execute("UPDATE image_embedding_results SET vector=? WHERE result_id=?", (b"broken", result_id))
+
+        class ReplacementEncoder:
+            def profile(inner):
+                return deepcopy(self.profile)
+
+            def encode_image(inner, data):
+                return argparse.Namespace(vector=(0., 1., 0.))
+
+        plan = image_embedding.create_plan([pid], store=self.store, config=self.config, profile=self.profile)
+        image_embedding.execute_plan(plan["run_id"], store=self.store, config=self.config,
+                                     encoder=ReplacementEncoder(), confirm=plan["digest"])
+        current = self.search()
+        self.assertEqual(current["results"][0]["result_id"], result_id)
+        self.assertEqual(current["results"][0]["score"], 0.)
+        self.assertNotEqual(current["results"][0]["vector_hash"], snapshot["results"][0]["vector_hash"])
+        folder = self.folder("repaired")
+        self.assert_error("SEARCH_SNAPSHOT_STALE", management.select_search_results, snapshot, [pid], store=self.store)
+        self.assert_error("SEARCH_SNAPSHOT_STALE", virtual_folders.add_photos, folder, [pid],
+                          store=self.store, search_snapshot=snapshot)
+        self.assertEqual(management.photos(store=self.store, folder_ids=[folder])["total"], 0)
+        selected = management.select_search_results(current, [pid], store=self.store)
+        self.assertEqual(selected["results"], current["results"])
+        backup = self.base / "repaired-backup.sqlite"
+        self.store.backup(backup)
+        with SQLiteStorage.open(backup) as copied:
+            self.assert_error("SEARCH_SNAPSHOT_STALE", management.select_search_results, snapshot, [pid], store=copied)
+            self.assertEqual(management.select_search_results(current, [pid], store=copied)["results"], selected["results"])
+
+    def test_same_vector_repair_preserves_selection_but_hashless_snapshots_fail(self):
+        self.configure()
+        pid = self.ids[0]
+        self.seed(pid)
+        snapshot = self.search()
+        self.seed(pid)
+        self.assertEqual(management.select_search_results(snapshot, [pid], store=self.store)["results"], snapshot["results"])
+        snapshot["results"][0].pop("vector_hash")
+        self.assert_error("INVALID_ARGUMENT", management.select_search_results, snapshot, [pid], store=self.store)
 
     def test_show_results_cli_keeps_inputs_and_only_renders_selected_images(self):
         self.configure()
@@ -739,6 +786,172 @@ class ManagementTests(unittest.TestCase):
         except OSError as exc:
             self.skipTest("Local symbolic links unavailable: " + str(exc))
         self.assert_error("INVALID_ARGUMENT", export_path, alias, self.config, self.store, (".jpg",))
+
+    def test_export_hardlink_race_never_truncates_originals(self):
+        self.configure()
+        self.seed(self.ids[0])
+        original = self.materialize()
+        before = original.read_bytes()
+        for existing in (False, True):
+            with self.subTest(existing=existing):
+                output = self.base / ("existing.json" if existing else "new.json")
+                if existing:
+                    output.write_text("previous export", encoding="utf-8")
+
+                def link_after_preflight():
+                    if existing:
+                        output.unlink()
+                    os.link(original, output)
+
+                encoder = FakeEncoder(self.profile, on_encode=link_after_preflight)
+                with patch("photography_lib.siglip_embedding.SiglipEncoder", return_value=encoder):
+                    if existing:
+                        self.command("search", "tree", "--mode", "semantic", "--output", str(output))
+                        self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["query"], "tree")
+                        self.assertFalse(output.samefile(original))
+                    else:
+                        self.assert_error("EXPORT_PATH_CHANGED", self.command, "search", "tree", "--mode", "semantic",
+                                          "--output", str(output))
+                        self.assertTrue(output.samefile(original))
+                self.assertEqual(original.read_bytes(), before)
+                output.unlink()
+        self.assertEqual(list(self.base.glob(".smart-albums-export-*")), [])
+
+    def test_atomic_export_failure_keeps_old_output_and_removes_temporary_file(self):
+        for failure in ("fsync", "replace"):
+            with self.subTest(failure=failure):
+                output = self.base / "old.json"
+                output.write_bytes(b"previous complete export")
+                with patch.object(exports.os, failure, side_effect=OSError("injected write failure")):
+                    self.assert_error("EXPORT_FAILED", self.command, "photos", "--output", str(output))
+                self.assertEqual(output.read_bytes(), b"previous complete export")
+                self.assertEqual(list(self.base.glob(".smart-albums-export-*")), [])
+
+    def test_atomic_exports_create_missing_parents_and_replace_complete_reports(self):
+        parent = self.base / "new" / "nested"
+        output, html = parent / "view.json", parent / "view.html"
+        for limit in (1, 2):
+            with self.subTest(limit=limit):
+                result = self.command("photos", "--limit", str(limit), "--output", str(output), "--html", str(html))
+                self.assertEqual(json.loads(output.read_text(encoding="utf-8")), result)
+                self.assertEqual(html.read_text(encoding="utf-8").count('src="data:image/jpeg;base64,'), limit)
+        self.assertEqual(list(parent.glob(".smart-albums-export-*")), [])
+
+    def test_export_rejects_replaced_parent_after_preflight(self):
+        self.configure()
+        self.seed(self.ids[0])
+        parent = self.base / "reports"
+        parent.mkdir()
+        output = parent / "view.json"
+        output.write_bytes(b"old report")
+
+        def replace_parent():
+            parent.rename(self.base / "moved-reports")
+            parent.mkdir()
+            output.write_bytes(b"must stay unchanged")
+
+        encoder = FakeEncoder(self.profile, on_encode=replace_parent)
+        with patch("photography_lib.siglip_embedding.SiglipEncoder", return_value=encoder):
+            self.assert_error("EXPORT_PATH_CHANGED", self.command, "search", "tree", "--mode", "semantic",
+                              "--output", str(output))
+        self.assertEqual(output.read_bytes(), b"must stay unchanged")
+        self.assertEqual((self.base / "moved-reports" / "view.json").read_bytes(), b"old report")
+
+    @unittest.skipUnless(os.name == "nt", "Windows directory sharing contract")
+    def test_windows_export_pins_ancestors_during_publication(self):
+        parent = self.base / "reports"
+        output = parent / "nested" / "view.json"
+        output.parent.mkdir(parents=True)
+        output.write_bytes(b"old")
+        real_replace = os.replace
+
+        def try_redirect(source, destination, **kwargs):
+            with self.assertRaises(OSError):
+                parent.rename(self.base / "redirected")
+            return real_replace(source, destination, **kwargs)
+
+        with patch.object(exports.os, "replace", side_effect=try_redirect):
+            self.command("photos", "--output", str(output))
+        self.assertEqual(json.loads(output.read_text(encoding="utf-8"))["view"], "photos")
+
+    def test_html_and_thumbnail_use_atomic_export_publication(self):
+        original = self.materialize()
+        before = original.read_bytes()
+        for extension in (".html", ".jpg"):
+            with self.subTest(extension=extension):
+                output = self.base / ("racing-export" + extension)
+                real_write = exports.write_export
+
+                def race(target, data):
+                    os.link(original, output)
+                    return real_write(target, data)
+
+                if extension == ".html":
+                    with patch("photography_lib.management_report.write_export", side_effect=race):
+                        self.assert_error("EXPORT_PATH_CHANGED", self.command, "photos", "--html", str(output))
+                else:
+                    with patch.object(exports, "write_export", side_effect=race):
+                        self.assert_error("EXPORT_PATH_CHANGED", self.command, "thumbnail", self.ids[0],
+                                          "--output", str(output))
+                self.assertEqual(original.read_bytes(), before)
+                output.unlink()
+
+    def test_export_replaces_symlink_entry_without_following_it(self):
+        original = self.materialize()
+        before = original.read_bytes()
+        output = self.base / "replace.json"
+        output.write_bytes(b"old")
+        target = exports.prepare_export(output, self.config, self.store, (".json",))
+        output.unlink()
+        try:
+            output.symlink_to(original)
+        except OSError as exc:
+            self.skipTest("Local symbolic links unavailable: " + str(exc))
+        exports.write_export(target, b"new export")
+        self.assertFalse(output.is_symlink())
+        self.assertEqual(output.read_bytes(), b"new export")
+        self.assertEqual(original.read_bytes(), before)
+
+    def test_posix_new_export_uses_exclusive_native_rename_without_hardlinks(self):
+        for platform, name, flag in (("linux", "renameat2", 1), ("darwin", "renameatx_np", 4)):
+            rename = Mock(return_value=0)
+            library = argparse.Namespace(**{name: rename})
+            with self.subTest(platform=platform), patch.object(exports.sys, "platform", platform), \
+                    patch.object(ctypes, "CDLL", return_value=library), \
+                    patch.object(exports.os, "link", side_effect=OSError(errno.EPERM, "No hard links")) as link:
+                exports._publish_posix("temporary", "output.json", 42)
+            rename.assert_called_once_with(42, b"temporary", 42, b"output.json", flag)
+            link.assert_not_called()
+
+    def test_posix_new_export_never_falls_back_from_destination_conflicts(self):
+        rename = Mock(return_value=-1)
+        with patch.object(exports.sys, "platform", "linux"), \
+                patch.object(ctypes, "CDLL", return_value=argparse.Namespace(renameat2=rename)), \
+                patch.object(ctypes, "get_errno", return_value=errno.EEXIST), \
+                patch.object(exports.os, "link") as link, self.assertRaises(FileExistsError):
+            exports._publish_posix("temporary", "output.json", 42)
+        link.assert_not_called()
+
+    def test_posix_unsupported_exclusive_rename_falls_back_to_no_clobber_link(self):
+        rename = Mock(return_value=-1)
+        with patch.object(exports.sys, "platform", "linux"), \
+                patch.object(ctypes, "CDLL", return_value=argparse.Namespace(renameat2=rename)), \
+                patch.object(ctypes, "get_errno", return_value=errno.ENOSYS), \
+                patch.object(exports.os, "link") as link, patch.object(exports.os, "unlink") as unlink:
+            exports._publish_posix("temporary", "output.json", 42)
+        link.assert_called_once_with("temporary", "output.json", src_dir_fd=42, dst_dir_fd=42, follow_symlinks=False)
+        unlink.assert_called_once_with("temporary", dir_fd=42)
+
+    def test_darwin_distinct_enotsup_allows_exclusive_link_fallback(self):
+        rename = Mock(return_value=-1)
+        with patch.object(exports.sys, "platform", "darwin"), \
+                patch.object(ctypes, "CDLL", return_value=argparse.Namespace(renameatx_np=rename)), \
+                patch.object(ctypes, "get_errno", return_value=45), \
+                patch.object(exports.errno, "ENOTSUP", 45), patch.object(exports.errno, "EOPNOTSUPP", 102), \
+                patch.object(exports.os, "link") as link, patch.object(exports.os, "unlink") as unlink:
+            exports._publish_posix("temporary", "output.json", 42)
+        link.assert_called_once_with("temporary", "output.json", src_dir_fd=42, dst_dir_fd=42, follow_symlinks=False)
+        unlink.assert_called_once_with("temporary", dir_fd=42)
 
     def test_jpeg_exports_reject_absolute_and_relocated_scan_source_directories(self):
         self.store.start_scan("scan-export", str(self.source), "relocated-source")

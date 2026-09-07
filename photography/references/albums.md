@@ -65,6 +65,6 @@ See [management](management.md) for original-path maintenance and exports,
 [ingestion](ingest.md) for stable path identity, and [index](index.md) for confirmed
 embedding and six opt-in feature components. Their profiles/results, dependencies,
 scene text prototypes and OCR derivative travel with backups; weights do not.
-Stage 2 OR search is planned, not implemented; metadata/semantic defaults are unchanged.
+Stage 2 OR search is implemented through separate [condition commands](search.md#stage-2-or-condition-workflow); targeted integration checks have passed. Metadata/semantic defaults are unchanged. Querying remains read-only; only explicit `folders add --query-snapshot` with finalized selected IDs writes memberships, never a live rule.
 Stop all writers before moving/syncing files; a portable database
 does not imply that originals or a compatible runtime are available on another host.

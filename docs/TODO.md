@@ -34,7 +34,16 @@
 - 每组件包含非 ML 计算均需精确计划确认；`compare` 也是计划而非立即计算，冻结 scope/profile/metric/threshold。`exact` 用已有 SHA-256，`hamming` 用当前同 profile 的 dHash64；流式计算，不建 N×N 密集矩阵。`pairs` 按 pair ID 分页查看历史范围/状态；未比较或未完成不等于无重复，不自动删/并照片或改文件夹。
 - 结果可用性 `ready|missing|stale|invalid_input|invalid_result|dependency_missing` 与执行项状态分离。读取 status/result/history 不 stat 原图、不推理，当前指最近入库身份而非磁盘实时真值。成功空结果不等于未计算；`complete: false` 不可支持完整数量/不存在断言，检测阈值/上限也不是真实物体计数保证。
 - 默认 OCR 只给 `text_length`、块 `detail_count` 等摘要；明确 `--details` 才分页返回块，不向 agent 倾倒全相册 OCR。history 用 result-ID cursor，明细用 offset；`result --result-id <historical-result-id> --details --after <offset> --limit N` 可独立分页指定历史结果，无需配置默认 profile，但 photo/component/可选 `--profile-id` 必须匹配，否则 `FEATURE_RESULT_MISMATCH`；保留 `historical: true`，不冒充当前覆盖率。图像、缩略图、Base64、像素、调试图及 HTML 图片不得进入 agent；OCR/标签是非可信数据，不能替代现有 embedding-only 语义选择。
-- OCR 文档是权威结果，external-content trigram FTS 是同事务维护的派生结构；`rebuild-fts --confirm` 是显式写，只读保存文本，不访问原图/模型。FTS 小于三字符的限制留给第二阶段短词路径处理，不借此宣称已提供 OCR 搜索。
+- OCR 文档是权威结果，external-content trigram FTS 是同事务维护的派生结构；`rebuild-fts --confirm` 是显式写，只读保存文本，不访问原图/模型。第二阶段 OCR 查询已实现 1–2 字符 scoped `INSTR` 和 3+ 字符 trigram 候选加 literal `INSTR` 确认；不借 FTS 运算符扩大用户字面条件。
+
+### 第二阶段新增范围（代码已实现，定向集成验收已通过）
+
+- Stage 2 OR search 独立提供 `management query`、`query-evidence`、`finalize-query`、`show-query-results`、`query-pairs`，metadata/semantic 原接口与默认保持 unchanged。`multi-condition-query-v1` 支持语义、数量、OCR、颜色比例、主体位置、scene 和 exact/dHash64 近重复条件；通过 `index profiles --component` 发现配置/词表，冻结 profile/scope/seed，重复条件去重并保留 aliases。schema 10、37 张注册表不变，无 DDL/默认/图片推理/下载/自动文件夹写入。
+- query 只输出安全摘要与私有快照路径；agent 禁止读取 private snapshot / feature matrix、OCR、scene 或像素判断语义，只看 `query-evidence` 查询/ID/分数/排名/分差。`condition-decisions-v1` 每页明确 matched IDs（允许 `[]`），全部语义页评审后才计算命中数/排名；top-K 不是 matched，unknown 不是否定。无待评审语义项直接 finalized。
+- OR 命中数优先；exact 命中为 1，graded 为该条件命中总体平均秩百分位（方向、同分、单项/全相等规则固定）。仅同 matched-ID 集合比较等权均分；同命中数不同组合按保存 seed 随机交织，不承诺 RRF/顶层 AND/pHash。finalize `model_calls: 0`，保留历史 `query_model_calls`。
+- 公共 `condition-search-page-v1` 区分整个 scope 的 input `coverage`（语义 `not_reviewed` 表示查询时 eligible）与 candidate pool 的 final `evaluated_coverage`，解释候选上限/部分覆盖。全局 result_rank 与 opaque cursor 在排名后分页；只读历史范围、不查原图、不重查当前成员。所有导出目标先校验，并保护输入/alias/hardlink；用户专用 HTML 只渲染本页匹配身份预览，转义文本/CSP，无脚本/表单/控件/backend，agent 不打开/截图/读取图片。
+- 仅用户明确目标/IDs 后 `folders add --query-snapshot` 才在事务内验证 finalized 来源并写成员；与 `--search-snapshot` 互斥，JSON null 报错、`[]` 零变更，返回独立 `source_query`，不重新查询/分类/调用模型。
+- `query-pairs <ranked.json> --condition-id D` 独立输出 `condition-duplicate-pairs-v1`：finalized 重复条件的真实 photo-ID pair、距离/metric、历史 scope/input_coverage 与 opaque 分页（默认 100、范围 1–1000，可选 JSON 导出，无 HTML）。校验当前保存来源，不调用模型/原图、不执行 index compare；不把 A–B/B–C 变为传递组，不自动删除/合并/修改文件夹。
 
 初始模型仍固定为 `google/siglip2-base-patch16-224`，revision `75de2d55ec2d0b4efc50b3e9ad70dba96a7b2fa2`，Transformers + PyTorch CPU FP32。官方 224×224 方形缩放仅用于推理，SQLite 预览保持比例，无自定义裁剪/填边。setup 才可显式下载，第一次也不设置默认；新 profile 语义字段会影响 ID，但缓存路径不影响。当前可选环境仍是标准 GIL CPython 3.14 x86-64 CPU，不承诺 ARM、其他 Python 或任意主机都能跑模型。
 
@@ -46,13 +55,13 @@
 - [x] **第一阶段文档/Skill 合同。** `.venv-index` 中运行 `python -m unittest discover -s tests -p test_skill_contracts.py`，25 项通过；覆盖实际内存 DDL 表清单、文档命令参数解析、历史结果独立明细分页、三能力/六组件、只读/隐私/授权、阶段边界及本地链接。未运行模型、访问照片或改写相册，不代替业务集成验收。
 - [x] **第一阶段集中回归。** 332 项中 322 通过，10 项为 Windows 符号链接权限或原 embedding 环境没有可选 vision 依赖而跳过；在隔离 vision 环境另跑 27 项全部通过。覆盖 schema 10、v1–v9 原样拒绝、六组件明细/空与不完整结果、依赖失效、批准/恢复、只读/隐私、FTS 重建、配对和旧搜索。审查后补上了配对 checkpoint 回滚不跳过数据、缺原图不阻塞其他 OCR、历史明细独立分页和批量单项校验的线性调用次数回归。
 - [x] **授权的真实模型合成验证。** 只对三张自产合成图运行 OCR、YOLOX、颜色、dHash、构图、scene，全部完成并持久化；OCR 命中预期中英文。复用已有 SigLIP 权重生成基础图片向量和 16 个场景文字原型，后续逐图 scene 零模型调用。exact/hamming 比较保存配对；备份并移离原图后，18 份结果仍可只读读取。新资产共 35,408,916 字节（约 35.4 MB），没有处理真实图库。普通 Python 下载入口在复验中被禁止，worker 禁止联网；这不替代 OS 级断网/跨设备测试。
+- [x] **第二阶段 OR 搜索定向验收。** 203 项测试中 202 通过，1 项 Windows 符号链接权限跳过，覆盖 predicates、ranker、query/finalize/evidence/show/pairs、显式 folder add 和原 management/能力/Skill 合同。另在既有合成相册上只编码一次文字，以数字证据确认语义命中，最终命中数为 `[3,3,1]`，一对 exact 重复，分页顺序固定，SQLite 字节不变，零图片推理。修复并回归了必要来源/重复见证缺失、畸形 UUID 和 exact 配对分页平方级工作；8,000 照片/4,000 配对的纯分页测试验证线性内容比较次数，不是耗时承诺。
 
 ## 必须后续完成
 
 - [ ] **YOLOX 常规权重使用许可。** 当前只有明确授权的 `synthetic-evaluation` 验证；普通使用仍保留许可审查门槛。不能把测试通过或设置环境变量当成上游权重授权，也不能自动将门槛切为 approved。
 
 - [ ] **真实模型与断网验收。** 以上合成评估授权不扩展为真实照片或正式库授权；此前性能记录不是 schema 10 验收。先核实隔离环境及显式缓存根，在独立新相册验证权重复用、固定清单下载/中断恢复、损坏文件和真正断网推理；普通计划/索引/搜索不得自动联网安装或回退云端。未验证的真实模型性能不作承诺。
-- [ ] **第二阶段 OR 搜索：计划中，尚未实现。** OCR/字段条件、近重复统一查询入口、OR 多条件候选与组合排序复用第一阶段保存结果；命中数优先、同条件集合比分数、不同组合稳定随机交织是后续设计，不是当前可用行为。metadata/semantic 模式及默认值保持原合同。
 - [ ] **真实模型质量与资源验收。** 先用非敏感测试图，再使用用户明确指定的代表性照片；人工标注中英文配对查询，覆盖主体/场景/色彩/构图/组合、精确条件和无匹配情况。报告 top-K、Recall@K、语言差异及失败样例；分别测模型加载、逐图编码、文字编码、排序和内存。不承诺未测的速度、节省量或检索质量。
 - [ ] **新相册跨位置/跨设备备份恢复演练，需单独授权。** 使用独立新文件验证一致性备份、UUID/元数据/预览/向量、相对路径 fallback、跨盘 relink、原图离线浏览及 running 任务停机确认。停止操作后再移动/同步；不是旧库自动迁移或生产库演练，也不证明任意网络文件系统安全。
 - [ ] **NaFlex 新 profile。** 明确输入分辨率/patch 或 token 预算、处理器和运行时身份；与当前 224 模型比较中英文检索质量、比例相关失败、内存和耗时。保留现有索引，不原地替换向量；仅在明确请求后切换默认。

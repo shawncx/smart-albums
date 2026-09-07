@@ -171,9 +171,11 @@ def _source_summary(selected):
     return source, selection
 
 
-def add_photos(folder_id, photo_ids, *, store, search_snapshot=None):
+def add_photos(folder_id, photo_ids, *, store, search_snapshot=None, query_snapshot=None):
     _id(folder_id, "Folder")
     ids = _ids(photo_ids, "Photo")
+    if search_snapshot is not None and query_snapshot is not None:
+        raise PhotographyError("INVALID_ARGUMENT", "Choose a search snapshot or a query snapshot, not both.")
     with _write(store):
         store.folder(folder_id)
         for photo_id in ids:
@@ -183,12 +185,19 @@ def add_photos(folder_id, photo_ids, *, store, search_snapshot=None):
             from .management import select_search_results
 
             selected = select_search_results(search_snapshot, ids, store=store)
+        source_query = None
+        if query_snapshot is not None:
+            from .condition_search import select_results
+
+            source_query = select_results(query_snapshot, ids, store=store)
         changed = store._add_folder_photos(folder_id, ids)
         result = _result(store, store.folder(folder_id),
                          _membership_counts(len(photo_ids), len(ids), changed, "added"))
         result["photo_ids"] = ids
         if selected is not None:
             result["source_search"], result["selection"] = _source_summary(selected)
+        if source_query is not None:
+            result["source_query"] = source_query
     return result
 
 

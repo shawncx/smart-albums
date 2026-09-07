@@ -15,7 +15,7 @@ One Skill exposes exactly these three capabilities. They are independent, not an
 | --- | --- | --- |
 | ingestion | Import/rescan a folder into the selected album file | `ingestion <absolute-photo-root>` |
 | index | Install/verify local assets, choose a component/profile, prepare embeddings or opt-in feature evidence, inspect or resume confirmed work | `index setup`, `profiles`, `configure`, `register-profile`, `plan`, `execute`, `status`, `result`, `result-history`, `prototypes`, `compare`, `pairs`, `rebuild-fts`, `job`, `resume` |
-| management | Create/open/backup the album file; manually manage virtual folders; browse/search saved photos in an explicit scope; export previews; locate/relink originals; inspect scans | `management create`, `open`, `backup`, `folders`, `photos`, `photo`, `search` (metadata or semantic), `show-results`, `original`, `relink`, `thumbnail`, `scan`, `scan-events` |
+| management | Create/open/backup the album file; manually manage virtual folders; browse/search saved photos in an explicit scope; export previews; locate/relink originals; inspect scans | `management create`, `open`, `backup`, `folders`, `photos`, `photo`, `search` (metadata or semantic), `show-results`, `query`, `query-evidence`, `finalize-query`, `show-query-results`, `query-pairs`, `original`, `relink`, `thumbnail`, `scan`, `scan-events` |
 
 Browse/search is read-only. Album creation, manual folder membership and original-path maintenance are explicit management writes, not a fourth capability. Virtual folders are static, flat many-to-many collections inside one SQLite album, not internal albums or disk directories. There are no selection widgets, compatibility commands or cloud analysis. Cross-album search, clustering, duplicate removal, image-to-image search, automatic regrouping/curation and standalone speech recognition are outside this version.
 
@@ -142,7 +142,7 @@ Default `result`/`result-history` output is a summary: OCR `text_length` and blo
 
 Comparisons stream fingerprint distances without an N×N dense matrix. `pairs` returns saved historical evidence with pair-ID pagination and run scope/status; uncomputed or incomplete comparisons do not establish non-duplication. Exact comparison uses saved SHA-256, not fresh original reads. Never automatically delete/merge photos or change folders. `rebuild-fts --confirm` is a separately requested write over saved OCR documents only, with no models/original reads; it is not a search command.
 
-**Stage 2 OR search is planned, not implemented.** New structured feature queries, duplicate-search UI and combined ranking are not available yet. Metadata/semantic modes and defaults remain unchanged. Do not use feature details to rerank or verify existing semantic candidates: the embedding-only display policy below still applies.
+**Stage 2 OR search is implemented** through the separate management condition workflow below; targeted integration checks have passed. Metadata/semantic modes and defaults remain unchanged. Do not use feature details to rerank or verify existing semantic candidates: the embedding-only display policy below still applies.
 
 ## management
 
@@ -161,6 +161,7 @@ management folders show <folder-id> [--profile-id <profile-id>]
 management folders rename <folder-id> --name <new-name>
 management folders delete <folder-id>
 management folders add <folder-id> --ids-file <photo-ids.json> [--search-snapshot <candidates.json>]
+management folders add <folder-id> --ids-file <photo-ids.json> --query-snapshot <ranked.json>
 management folders remove <folder-id> --ids-file <photo-ids.json>
 ```
 
@@ -194,9 +195,40 @@ Names are trimmed, nonempty, control-character-free text with a unique NFC + cas
 
 Keep the original candidate snapshot and selection file unchanged. Folder changes alone do not stale a historical result; if a chosen photo's input/result identity has changed since retrieval, report `SEARCH_SNAPSHOT_STALE` and obtain a fresh search instead of inspecting a different image version. Distinguish candidate count from coverage of the captured scope: reviewing top-K is not proof of finding every match. With no valid index/candidates, explain missing coverage rather than claiming no relevant photos exist. Never describe embedding-only selection as looking at the photos or detecting people reliably.
 
+### Stage 2: OR condition queries and private semantic review
+
+Read [query JSON, predicates and decisions](references/search.md#stage-2-or-condition-workflow). These are new read-only management commands, not changes to existing metadata/semantic search or permission to run index:
+
+```text
+management query --query-file <query.json> --output <private-snapshot.json>
+management query-evidence <private-snapshot.json> --condition-id A [--page N]
+management finalize-query <private-snapshot.json> --decisions-file <decisions.json> --output <ranked.json>
+management show-query-results <ranked.json> [--limit N] [--after <opaque-cursor>] [--output <page.json>] [--html <report.html>]
+management query-pairs <ranked.json> --condition-id D [--limit N] [--after <opaque-cursor>] [--output <pairs.json>]
+```
+
+1. Translate the user's explicit conditions into `multi-condition-query-v1`, `operator: "or"` and unique stable IDs. Discover actual profiles/taxonomies using `index profiles` / `index profiles --component <component>`, not invented IDs, scene names or classes. Kinds: `semantic`, `object_count`, `ocr_contains`, `color_fraction`, `subject_position`, `scene`, `has_near_duplicate`. Freeze defaults into explicit profile IDs; duplicate normalized predicates count once and return `aliases`. Freeze folder scope, random seed and review page size. Multiple distinct folder IDs require union/intersection; no invalid-folder fallback.
+2. Run `query`; it prints only a safe summary plus the private output path. **Do not read the private snapshot file or its feature matrix.** Do not use OCR snippets, scene labels, feature cells, filenames, folder labels or pixels to judge a semantic condition, including when another condition already matched that photo. Only the program evaluates structured predicates.
+3. For every semantic condition/page in the summary, call `query-evidence`. Its only relevance evidence is the query and numeric embedding `score`, `candidate_rank`, `score_gap_from_best`, `score_gap_to_next`; hashes/IDs identify records only. Page defaults to 0; use each returned `page_id` and condition ID. Never open/screenshot images, inspect raw vector components, or use `index result --details` to fill semantic decisions. Decide conservatively from these numbers only, not a quota or a guaranteed detection.
+4. Write `condition-decisions-v1`: `{"schema":"condition-decisions-v1","snapshot_id":"<returned-id>","pages":[{"condition_id":"A","page_id":"<returned-page-id>","matched_photo_ids":[]}]}`. Return all required matched-ID pages exactly once; `[]` for a reviewed page means no selected matches, while omitting a required page is an error. IDs must belong to that page. Full semantic review before match counts and ranking is mandatory; top-K is not matched. Preserve original query, candidate and decision input files.
+5. Finalize to a separate JSON file. Finalization calls no model (`model_calls: 0`), while historical `query_model_calls` stays in the saved snapshot. No reviewable semantic cells means query already returns `stage: finalized`; do not finalize it again.
+6. Show only finalized results using `show-query-results`. Default limit is 100, range 1–1000; use the opaque returned `next_cursor` without changing the snapshot. Pagination applies after final ranking and retains global `result_rank`. The `condition-search-page-v1` page carries conditions, aliases, historical scope, input `coverage`, final `evaluated_coverage`, scope/candidate/total counts, per-condition statuses and normalized scores. Export user-only HTML and return its link; do not open it in an agent browser/screenshot tool or read its image payloads.
+
+OR means at least one matched condition. Missing/stale/invalid/unsupported is unknown, not a negative; unknown never increases match count. Input `coverage` is over the entire frozen scope: semantic `not_reviewed` means index-eligible at query time, not a match. `evaluated_coverage` is final matched/not_matched/unknown over the candidate pool. Semantic candidate limits can leave unreviewed photos outside the pool; report partial coverage and never claim all matches were found.
+
+Rank by unique matched-condition count first. `exact` matches normalize to 1; `graded` uses direction-aware average-rank percentiles within that condition's matched population, with tied average ranks and a single/all-equal population scoring 1. Compare equal-weight mean scores only for the same matched-condition ID set. Different patterns with the same count interleave using the frozen random seed while preserving each pattern's order. Do not promise RRF, top-level AND, calibrated probabilities or cross-pattern score comparison.
+
+OCR searches NFKC/casefold/whitespace-normalized literal text: 1–2 characters use scoped `INSTR`; 3+ use trigram candidates plus literal `INSTR` confirmation, not FTS operators. Counts require complete saved detections and a threshold at least the profile's saved floor. Missing/incomplete subjects are unknown. Colors use versioned palette fractions, scenes use saved catalog cosine scores, and positions use saved subject-box thirds, not segmentation/aesthetics. Duplicate predicates use saved exact SHA-256 or same-profile dHash64 Hamming only, not pHash; they never delete/merge photos.
+
+For an explicit duplicate inspection, use `query-pairs` on the finalized snapshot with its actual `has_near_duplicate` condition ID. The `condition-duplicate-pairs-v1` JSON reports actual `photo_id_a`/`photo_id_b`, distance/metric, total, historical scope, condition and `input_coverage`. Default limit is 100 (1–1000); follow that pair view's opaque cursor, not a result-page cursor. It validates current saved sources and performs no original reads, model calls or image rendering; no `--html` option. Pairs are not transitive groups: A–B and B–C do not prove A–C. Never automatically delete/merge photos or change folders. This is separate from confirmed `index compare` runs and historical `index pairs`; do not execute comparison/index jobs to show saved query pairs.
+
+Every export destination is validated before query encoding, source validation, preview reads or writes; use `.json`/`.html` respectively and do not alias/hardlink any input. Queries neither write SQLite/DDL/defaults nor read originals, infer images, download assets, rebuild FTS or automatically change folders. Reports preserve historical scope without rechecking current membership or originals; saved previews must match source identities. New imports, folder changes and manual removals do not create live rules.
+
 ### Optional one-time organization
 
 **Search-selected add:** use an explicitly chosen destination folder (or create the user's custom folder) and explicitly selected candidate IDs. For semantic results, call `management folders add <folder-id> --ids-file <selected.json> --search-snapshot <candidates.json>`. This reuses `management.select_search_results` validation of album, candidate identity and selected subset; it performs no new query or image encoding. Do not default to all top-K, remove source memberships or infer a dynamic rule.
+
+For finalized OR query results only, use `management folders add <folder-id> --ids-file <selected.json> --query-snapshot <ranked.json>`. The `--query-snapshot` and `--search-snapshot` flags are mutually exclusive; supplied JSON `null` is an error, not manual fallback. Inside the explicit membership transaction, `condition_search.select_results` validates album, finalized source identities and the selected subset, including `[]`. Return `source_query` provenance separately from old `source_search`. No query/classification/model calls or automatic folder writes occur.
 
 **Date organization:** no index or model is needed. Prepare a read-only plan for exactly `--all` or `--ids-file`; this is independent of browse pages and search top-K:
 
@@ -231,4 +263,4 @@ The [schema inventory](../docs/index-design.md#3-schema-10-37-registered-tables)
 
 Stage-one regression and authorized synthetic integration have passed: all six components persisted results for three synthetic photos, and 18 results remained readable from an offline-original backup. Ordinary YOLOX use remains license-gated. Do not treat synthetic evaluation as permission to process a user's photos, or claim unmeasured real-photo quality, performance, memory, cross-host support or OS-level network isolation.
 
-Required follow-ups include stage-two search, NaFlex as a separate profile, focus/exposure technical parameters and independent embedding ONNX/quantization evaluation. OCR/objects ONNX workers do not change the SigLIP embedding backend. There are no empty `technical_*` tables or inferred completion of uncomputed components.
+Stage-two query code is implemented and targeted integration checks have passed. Cached synthetic OR retrieval used one text encoding, zero image inference and no database changes; this is not real-photo quality or cross-host validation. Required follow-ups include NaFlex as a separate profile, focus/exposure technical parameters and independent embedding ONNX/quantization evaluation. OCR/objects ONNX workers do not change the SigLIP embedding backend. There are no empty `technical_*` tables or inferred completion of uncomputed components.

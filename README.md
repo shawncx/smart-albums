@@ -55,7 +55,7 @@ Fully indexed repeat scans do not prompt again. Importing, accepting the invitat
 
 ## index: explicit setup, configuration and execution
 
-**Stage 1 only:** `ocr`, `objects`, `scene`, `color`, `composition` and `perceptual_hash` are components inside index, not six new public capabilities. Existing commands without `--component` still select `image_embedding`; ingestion invitations and metadata/semantic search defaults are unchanged. Stage 2 OR search, structured feature queries and combined ranking are **planned, not implemented**.
+`ocr`, `objects`, `scene`, `color`, `composition` and `perceptual_hash` are components inside index, not six new public capabilities. Existing commands without `--component` still select `image_embedding`; ingestion invitations and metadata/semantic search defaults are unchanged. **Stage 2 OR search is implemented** as separate management commands consuming saved evidence; targeted integration checks have passed, not a real-photo quality claim.
 
 Install image-embedding dependencies in a dedicated compatible CPython 3.14 x64 virtual environment. Model download and real-model trials require separate authorization; code approval is not that authorization.
 
@@ -172,6 +172,31 @@ The selected ID file may contain `[]`. This helper does not repeat a query or mo
 
 Both modes and plain browsing are read-only and do not stat originals or repair paths. HTML/JSON are snapshots, with no selection widgets, album membership writes or live service. `management thumbnail`, `scan` and `scan-events` retain preview export and ingestion diagnostics. See [management](photography/references/management.md) and [search](photography/references/search.md).
 
+### Stage 2: explicit OR conditions
+
+The separate query workflow reuses saved indexes without image inference, downloads, DDL, configuration changes or automatic folder writes:
+
+```text
+management query --query-file <query.json> --output <private-snapshot.json>
+management query-evidence <private-snapshot.json> --condition-id A --page 0
+management finalize-query <private-snapshot.json> --decisions-file <decisions.json> --output <ranked.json>
+management show-query-results <ranked.json> --limit 100 --output <page.json> --html <report.html>
+management show-query-results <ranked.json> --limit 100 --after <opaque-cursor>
+management query-pairs <ranked.json> --condition-id G --limit 100 --output <pairs.json>
+```
+
+Use `multi-condition-query-v1` with `operator: "or"` and stable condition IDs. Supported kinds are `semantic`, `object_count`, `ocr_contains`, `color_fraction`, `subject_position`, `scene` and `has_near_duplicate` (saved exact SHA-256 or dHash64 Hamming, not pHash). Discover profile IDs and supported object/scene catalogs with `index profiles --component <component>`; defaults resolve once and freeze. Duplicate predicates deduplicate with `aliases`. See the [complete query and decision JSON contracts](photography/references/search.md#stage-2-or-condition-workflow).
+
+`query` prints only a safe summary and output path. Its private snapshot contains an internal feature matrix: **the agent must not read the private snapshot file**, OCR, scene labels or other feature cells to judge semantic relevance. Read only `query-evidence` query/IDs and numeric embedding scores/ranks/gaps, then supply every required page using `condition-decisions-v1` matched-ID lists (an empty list is valid). Full semantic review precedes match counts/ranking; top-K retrieval is not a match decision. Queries with no reviewable semantic cells finalize automatically.
+
+OR keeps photos matching at least one unique condition; unknown is not negative. Ranking prioritizes match count. Exact matches score 1; graded matches use direction-aware average-rank percentiles among that condition's matched photos. Only identical matched-ID sets compare their equal-weight mean; different patterns at the same count interleave using the frozen seed. There is no cross-pattern score comparison, RRF or top-level AND.
+
+`condition-search-page-v1` exposes input `coverage` over the query scope separately from final `evaluated_coverage` over the candidate pool. Semantic input `not_reviewed` means eligible at query time. Report candidate limits and incomplete coverage; unreturned photos are not proven nonmatches. Results retain global ranks and opaque cursors, historical scope and saved source identities. JSON and user-only HTML exports are the only query side effects; give the user the report link without opening, screenshotting or reading its image payloads.
+
+`query-pairs` requires a finalized snapshot and a `has_near_duplicate` condition ID. It returns `condition-duplicate-pairs-v1` with actual ordered photo-ID pairs, distance/metric, historical scope and input coverage; follow its own opaque `next_cursor` (default limit 100, 1–1000). This saved exact SHA-256/dHash64 view is JSON-only, read-only and source-validated: no originals/models, transitive duplicate groups, automatic deletion/merging or folder changes. It does not run the separate `index compare` planning/execution workflow.
+
+For an explicitly requested destination and selected finalized IDs, use `management folders add <folder-id> --ids-file <selected.json> --query-snapshot <ranked.json>`. It validates sources inside the membership transaction, returns separate `source_query` provenance, and does no query/classification/model work. This flag is mutually exclusive with `--search-snapshot`; `[]` adds nothing.
+
 ### Optional one-time organization
 
 For an explicitly chosen destination, add selected semantic candidate IDs with `management folders add <folder-id> --ids-file <selected.json> --search-snapshot <candidates.json>`. This reuses `management.select_search_results` validation of album/candidate/selected identities without a new query or image encoding; never default to all top-K or remove source memberships.
@@ -197,7 +222,7 @@ Use **one writer on one device at a time**. For cloud storage: download a comple
 
 New albums use **schema 10**, `application_id = 0x53414C42`, and **37 registered tables**: 32 ordinary tables, one external-content OCR FTS5 virtual table and four explicitly registered shadow tables (SQLite's internal `sqlite_sequence` is excluded). The existing six `image_embedding_*` tables and `virtual_folders` / `virtual_folder_photos` remain separate from the new feature profiles/results, typed details, manifests, dependencies and jobs. See the [complete schema inventory](docs/index-design.md#3-schema-10-37-registered-tables). No internal albums/libraries or empty `technical_*` placeholders are added.
 
-Existing v1–v9 databases are **rejected unchanged**: no migration, cleanup, overwrite or old CLI/API compatibility. The user's old database and backups must remain untouched. Management snapshots remain `album-snapshot-v2`; existing static reports are not converted.
+Existing v1–v9 databases are **rejected unchanged**: no migration, cleanup, overwrite or old CLI/API compatibility. The user's old database and backups must remain untouched. Existing management snapshots remain `album-snapshot-v2`; condition queries separately use `condition-search-snapshot-v1` and public `condition-search-page-v1`. Existing static reports are not converted.
 
 Stage-one regression and authorized synthetic integration have passed; see [validation status](docs/TODO.md). The isolated vision suite passed 27 tests, and all six components persisted results for three synthetic photos; 18 results remained readable from a backup with originals offline. Downloaded assets total 35,408,916 bytes (approximately 35.4 MB), with existing SigLIP weights reused. This covers **synthetic evaluation only**; ordinary YOLOX use remains license-gated. Real-photo quality, performance, cross-host support and OS-level network-isolation guarantees do not follow from these checks.
 

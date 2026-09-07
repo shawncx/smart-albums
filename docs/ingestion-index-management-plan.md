@@ -1,6 +1,6 @@
 # Smart Albums 三能力重构实施计划
 
-> 历史计划：下文的旧多相册、迁移、CLI 兼容及验收记录保留原意，不是现行使用合同。当前见 [现行设计](index-design.md)：一个 SQLite 文件一个相册，schema 10、37 张注册表（32 普通 + 1 external-content FTS5 + 4 显式影子表，不计内部 `sqlite_sequence`），`album-snapshot-v2`；v1–v9 原样拒绝且不迁移。原 embedding 六表与 management 静态文件夹合同保留，六项 opt-in feature 属 index，基础三能力不变。第二阶段 OR 搜索/组合排序计划中、尚未实现；metadata/semantic 默认及 embedding-only 展示不变，未核实的新模型性能不作验收声明。
+> 历史计划：下文的旧多相册、迁移、CLI 兼容及验收记录保留原意，不是现行使用合同。当前见 [现行设计](index-design.md)：一个 SQLite 文件一个相册，schema 10、37 张注册表（32 普通 + 1 external-content FTS5 + 4 显式影子表，不计内部 `sqlite_sequence`），原 `album-snapshot-v2` 保留；v1–v9 原样拒绝且不迁移。原 embedding 六表与 management 静态文件夹合同保留，六项 opt-in feature 属 index，基础三能力不变。第二阶段 OR 搜索/组合排序代码已实现，定向集成验收已通过，采用独立私有条件快照/公共结果页；metadata/semantic 默认及 embedding-only 展示不变，未核实的新模型性能不作验收声明。
 
 状态：首版代码已实现并通过离线回归。本文保留已确认的实施范围；真实模型下载、推理和正式图库验收仍待单独授权，NaFlex、技术参数及 ONNX/量化仍为后续工作。
 

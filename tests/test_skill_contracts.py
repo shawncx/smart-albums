@@ -176,6 +176,7 @@ class SkillContractTests(unittest.TestCase):
             "management folders rename <folder-id> --name <new-name>",
             "management folders delete <folder-id>",
             "management folders add <folder-id> --ids-file <photo-ids.json> [--search-snapshot <candidates.json>]",
+            "management folders add <folder-id> --ids-file <photo-ids.json> --query-snapshot <ranked.json>",
             "management folders remove <folder-id> --ids-file <photo-ids.json>",
             "management folders organize-date --all --granularity year|month|day --output <date-plan.json>",
             "management folders organize-date --ids-file <photo-ids.json> --granularity year|month|day --output <date-plan.json>",
@@ -432,19 +433,66 @@ class SkillContractTests(unittest.TestCase):
                                       r"|(?:not|never)[^.\n]{0,100}automatic downloads)")
         self.assertTrue((ROOT / "photography" / "requirements-features.txt").is_file())
 
-    def test_stage_two_search_is_planned_not_implemented_and_defaults_unchanged(self):
+    def test_stage_two_search_records_targeted_acceptance_without_changing_defaults(self):
         documents = [ROOT / "README.md", ROOT / "photography" / "SKILL.md", ROOT / "docs" / "index-design.md"]
         documents += list((ROOT / "photography" / "references").glob("*.md"))
         for document in documents:
             text = document.read_text(encoding="utf-8")
             with self.subTest(document=document.name):
                 self.assertRegex(text, r"Stage 2 OR search")
-                self.assertRegex(text, r"planned, (?:\*\*)?not implemented|planned, not implemented")
+                self.assertIn("Stage 2 OR search is implemented", text)
+                self.assertNotIn("planned, not implemented", text)
+                self.assertRegex(text, r"(?i)targeted integration checks have passed")
                 self.assertRegex(text, r"(?i)metadata/semantic")
                 self.assertRegex(text, r"(?i)(?:unchanged|remain unchanged)")
         text = (ROOT / "docs" / "TODO.md").read_text(encoding="utf-8")
-        for token in ("第二阶段 OR 搜索", "尚未实现", "未验证", "35.4"):
+        for token in ("第二阶段 OR 搜索", "代码已实现", "定向集成验收已通过", "未验证", "35.4"):
             self.assertIn(token, text)
+
+    def test_stage_two_skill_uses_only_numeric_evidence_not_private_matrices_or_images(self):
+        skill = (ROOT / "photography" / "SKILL.md").read_text(encoding="utf-8")
+        section = skill.split("### Stage 2: OR condition queries and private semantic review", 1)[1].split(
+            "### Optional one-time organization", 1)[0]
+        for phrase in ("Do not read the private snapshot file or its feature matrix",
+                       "Do not use OCR snippets, scene labels, feature cells",
+                       "query-evidence", "candidate_rank", "score_gap_from_best", "score_gap_to_next",
+                       "condition-decisions-v1", "matched_photo_ids", "page_id",
+                       "Full semantic review before match counts and ranking",
+                       "top-K is not matched", "unknown", "input", "evaluated_coverage",
+                       "global `result_rank`", "opaque", "only for the same matched-condition ID set",
+                       "frozen random seed", "index profiles", "aliases",
+                       "not pHash", "1–2 characters", "3+", "literal `INSTR`",
+                       "do not open it in an agent browser/screenshot tool",
+                       "model_calls: 0", "query_model_calls", "all", "alias/hardlink",
+                       "query-pairs", "condition-duplicate-pairs-v1", "photo_id_a", "photo_id_b",
+                       "Pairs are not transitive groups", "Never automatically delete/merge photos",
+                       "no `--html` option"):
+            self.assertIn(phrase, section)
+        self.assertIn("JSON `null` is an error", skill)
+        self.assertIn("source_query", skill)
+
+    def test_documented_condition_commands_parse_without_execution(self):
+        commands = {
+            "management query --query-file <query.json> --output <private-snapshot.json>",
+            "management query-evidence <private-snapshot.json> --condition-id A [--page N]",
+            "management finalize-query <private-snapshot.json> --decisions-file <decisions.json> --output <ranked.json>",
+            "management show-query-results <ranked.json> [--limit N] [--after <opaque-cursor>] [--output <page.json>] [--html <report.html>]",
+            "management query-pairs <ranked.json> --condition-id D [--limit N] [--after <opaque-cursor>] [--output <pairs.json>]",
+        }
+        root = parser()
+        for name in ("photography/SKILL.md", "photography/references/management.md", "photography/references/search.md"):
+            text = (ROOT / name).read_text(encoding="utf-8")
+            for command in commands:
+                self.assertIn(command, text)
+                for optional in (False, True):
+                    expanded = re.sub(r"\[([^\[\]]*)\]", r"\1" if optional else "", command)
+                    expanded = re.sub(r"<([^>]+)>", r"\1", expanded)
+                    expanded = re.sub(r"\bN\b", "2", expanded)
+                    with self.subTest(document=name, command=expanded):
+                        args = root.parse_args(["--database", str(ROOT / "contract-only.sqlite"),
+                                                *shlex.split(expanded)])
+                        self.assertIn(args.management_command,
+                                      ("query", "query-evidence", "finalize-query", "show-query-results", "query-pairs"))
 
 
 if __name__ == "__main__":

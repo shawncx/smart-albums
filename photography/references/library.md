@@ -69,7 +69,7 @@ browse/search scope and confirmed one-time EXIF date plans. Reports use
 `album-snapshot-v2`, preserving historical scope even after folder changes.
 Stage-one [feature components](index.md#stage-1-six-opt-in-components) are explicit
 index operations, not new capabilities or automatic work when opening a file.
-Stage 2 OR search is planned, not implemented; metadata/semantic defaults are unchanged.
+Stage 2 OR search is implemented through separate [condition commands](search.md#stage-2-or-condition-workflow); targeted integration checks have passed. Metadata/semantic defaults are unchanged. All condition queries open the selected album read-only, without DDL, migration, defaults or automatic membership changes; private snapshots/public result pages are exports, not new tables.
 
 ## Portable originals
 

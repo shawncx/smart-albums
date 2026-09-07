@@ -368,6 +368,13 @@ def semantic_search(query, *, store, config=None, profile_id=None, limit=10, aft
     result["query_token_count"] = encoding.token_count
 
     started = time.perf_counter()
+    result["results"] = rank_embedding_candidates(candidates, query_vector)[:limit]
+    result["timings"]["ranking_seconds"] = time.perf_counter() - started
+    return result
+
+
+def rank_embedding_candidates(candidates, query_vector):
+    """Rank a captured vector set without a retrieval-size cap or another model call."""
     query_norm = math.sqrt(math.fsum(value * value for value in query_vector))
     ranked = []
     for item, vector in candidates:
@@ -379,9 +386,7 @@ def semantic_search(query, *, store, config=None, profile_id=None, limit=10, aft
         item["candidate_rank"] = rank
         item["score_gap_from_best"] = ranked[0]["score"] - item["score"]
         item["score_gap_to_next"] = item["score"] - ranked[rank]["score"] if rank < len(ranked) else None
-    result["results"] = ranked[:limit]
-    result["timings"]["ranking_seconds"] = time.perf_counter() - started
-    return result
+    return ranked
 
 
 def _persist_path(record, resolution, album, store):

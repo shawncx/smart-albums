@@ -51,7 +51,9 @@ def _folder_commands(actions):
         change.add_argument("folder_id")
         change.add_argument("--ids-file", required=True, help="JSON array of photo IDs; a single ID is also an array.")
         if name == "add":
-            change.add_argument("--search-snapshot", help="Validate IDs against saved semantic candidates; no new search.")
+            source = change.add_mutually_exclusive_group()
+            source.add_argument("--search-snapshot", help="Validate IDs against saved semantic candidates; no new search.")
+            source.add_argument("--query-snapshot", help="Validate IDs against finalized condition results; no new query.")
     organize = commands.add_parser("organize-date", help="Prepare a read-only EXIF capture-date grouping plan.")
     source = organize.add_mutually_exclusive_group(required=True)
     source.add_argument("--all", dest="all_photos", action="store_true")
@@ -107,6 +109,9 @@ def add_commands(root_subparsers):
     events.add_argument("--after", type=int, default=0)
     events.add_argument("--changes-only", action="store_true")
     _folder_commands(actions)
+    from .condition_cli import add_commands as add_conditions
+
+    add_conditions(actions)
 
 
 def _protect_inputs(destinations, sources):
@@ -144,7 +149,11 @@ def _folder_command(args, store, config):
         snapshot = read_json_file(args.search_snapshot) if args.search_snapshot else None
         if args.search_snapshot is not None and not isinstance(snapshot, dict):
             raise PhotographyError("INVALID_ARGUMENT", "A supplied search snapshot must be a candidate JSON object.")
-        return virtual_folders.add_photos(args.folder_id, ids, store=store, search_snapshot=snapshot)
+        query_snapshot = read_json_file(args.query_snapshot) if args.query_snapshot else None
+        if args.query_snapshot is not None and not isinstance(query_snapshot, dict):
+            raise PhotographyError("INVALID_ARGUMENT", "A supplied query snapshot must be a finalized JSON object.")
+        return virtual_folders.add_photos(args.folder_id, ids, store=store, search_snapshot=snapshot,
+                                         query_snapshot=query_snapshot)
     if action == "organize-date":
         from .date_folders import plan_date_organization
 
@@ -165,6 +174,10 @@ def _folder_command(args, store, config):
 
 def command(args, store, config):
     action = args.management_command
+    if action in ("query", "query-evidence", "finalize-query", "show-query-results", "query-pairs"):
+        from .condition_cli import command as condition_command
+
+        return condition_command(args, store, config)
     if action == "folders":
         return _folder_command(args, store, config)
     if action == "original":

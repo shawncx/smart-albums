@@ -143,7 +143,9 @@ Report coverage for the scope actually inspected and distinguish unknown/not-che
 
 ## Stage 1: six opt-in components
 
-Stage 2 OR search, feature-field queries, duplicate-search UI and combined ranking are **planned, not implemented**. Stage 1 computes, saves, inspects and resumes evidence without changing metadata/semantic defaults, ingestion invitations or embedding-only display selection.
+**Stage 2 OR search is implemented** through separate [management condition commands](search.md#stage-2-or-condition-workflow); targeted integration checks have passed. They consume persisted feature evidence without index execution, image inference, downloads, DDL or default changes. Metadata/semantic defaults, ingestion invitations and embedding-only display selection remain unchanged. Discover actual profiles, object labels and scene catalog IDs with `index profiles --component <component>`; queries freeze these identities rather than inventing taxonomies or selecting new defaults. The agent must use only numeric `query-evidence` for semantic decisions, not private snapshots or feature details.
+
+`management query-pairs <ranked.json> --condition-id <duplicate-condition-id>` is a separate read-only, JSON-only view of actual saved-source pairs in a finalized condition query; it does not execute `index compare` or read an `index pairs` run. It uses saved SHA-256/dHash64, validates current sources and has opaque pagination. Neither view creates transitive groups, automatically deletes/merges photos or changes folders.
 
 | Component | Default recipe and evidence |
 | --- | --- |

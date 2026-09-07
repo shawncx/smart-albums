@@ -2,7 +2,7 @@
 
 Management is one of the three public Skill capabilities. **Plain browse/search is read-only**; album creation, manual virtual folder writes, explicit original/relink and exports/backups are separate operations. Management does not generate image embeddings, install models, create internal albums or offer automatic regrouping/curation.
 
-Stage 1 adds six opt-in [index components](index.md#stage-1-six-opt-in-components), not new management queries. Stage 2 OR search, OCR/field conditions, duplicate-search UI and combined ranking are **planned, not implemented**; metadata/semantic modes and defaults remain unchanged. Explicit `index result`/`result-history` inspect saved feature evidence; `compare` prepares a confirmed computation and `pairs` reads historical evidence. Neither automatically deletes/merges photos nor changes folders. Feature details are not permission to rerank existing semantic candidates or pass images to the agent.
+Stage 1 adds six opt-in [index components](index.md#stage-1-six-opt-in-components). **Stage 2 OR search is implemented** through separate condition commands; targeted integration checks have passed. Existing metadata/semantic modes and defaults remain unchanged. Explicit `index result`/`result-history` inspect saved feature evidence; `compare` prepares a confirmed computation and `pairs` reads historical evidence. Neither automatically deletes/merges photos nor changes folders. Feature details are not permission to rerank existing semantic candidates or pass images to the agent.
 
 For paged historical feature details, use `index result <photo-id> --component <component> --result-id <historical-result-id> --details --after <offset> --limit N`. No configured default is needed with an explicit result ID; photo/component and any optional `--profile-id` must match (`FEATURE_RESULT_MISMATCH` otherwise). Preserve `historical: true`; this read-only inspection is not current coverage or new search evidence.
 
@@ -30,6 +30,11 @@ management thumbnail <photo-id> --output <output-directory>\preview.jpg
 management scan <scan-id>
 management scan-events <scan-id> [--limit N] [--after <event-id>] [--changes-only]
 management show-results <candidates.json> --ids-file <selected.json> [--html <results.html>] [--output <displayed.json>]
+management query --query-file <query.json> --output <private-snapshot.json>
+management query-evidence <private-snapshot.json> --condition-id A [--page N]
+management finalize-query <private-snapshot.json> --decisions-file <decisions.json> --output <ranked.json>
+management show-query-results <ranked.json> [--limit N] [--after <opaque-cursor>] [--output <page.json>] [--html <report.html>]
+management query-pairs <ranked.json> --condition-id D [--limit N] [--after <opaque-cursor>] [--output <pairs.json>]
 ```
 
 `photos` and both `search` modes also accept repeatable `--folder-id <id>` and `--folder-match union|intersection`; see [folder scope](#folder-scope-for-browse-and-both-search-modes).
@@ -43,6 +48,14 @@ The album/photo view commands **create/open/photos/photo/search** share these op
 CLI JSON is returned without `--output`. Export paths use `html_output` and `output` in the result. HTML does not automatically create a companion JSON file; pass both options if needed. Backup/thumbnail use their own required `--output`, not the view options.
 
 `show-results` uses the profile captured by its input snapshot; it does not accept a profile override or perform a new search. It accepts only its listed export options and an explicit ID-array file, including an empty array.
+
+Condition commands also open the album read-only and never perform DDL/default writes, image inference, downloads or original reads. `query` requires a separate `.json` private snapshot and prints only a safe summary. The agent must not read the private snapshot file/feature matrix to judge semantic relevance. Use numeric-only `query-evidence` (page default 0), then all explicit `condition-decisions-v1` matched-ID pages; empty per-page selections are valid, missing pages are not. Finalization reports `model_calls: 0`, retaining historical snapshot `query_model_calls`. A query without reviewable semantic cells already finalizes automatically.
+
+`show-query-results` validates finalized source identities, pages after ranking (default 100, 1–1000), and retains global ranks with opaque snapshot-bound cursors. Its `condition-search-page-v1` JSON can be exported together with a user-only HTML report containing exactly that page's previews. Input `coverage` describes eligibility over the scope (`not_reviewed` semantic cells mean query-time eligible); `evaluated_coverage` describes final candidate-pool outcomes. Show conditions/aliases, matched counts/ID sets, per-condition cells, normalized scores and partial semantic coverage. Reports are escaped, script/form/widget/backend-free historical views, not new original checks or current-membership queries. Never open/screenshot their images for agent review.
+
+`query-pairs` takes a finalized snapshot and a `has_near_duplicate` condition ID. Its `condition-duplicate-pairs-v1` returns actual photo-ID pairs, distance/metric, total, condition, historical scope and `input_coverage`; default limit 100, range 1–1000, with a separate opaque `next_cursor`. Only optional JSON `--output` is supported, not HTML. It validates current sources and uses saved SHA-256/dHash64 values without models, originals, comparison jobs or membership changes. Pairs are not transitive groups; never automatically delete/merge photos. The separate `index pairs` command still reads confirmed historical comparison runs.
+
+Validate **all** `.json`/`.html` destinations before query encoding, current-source validation, preview reads or any write. Do not overwrite/alias/hardlink query, candidate or decision inputs, the album, sidecars, cache or recorded originals. Exports are the only query side effects. See [full OR query/ranking protocol](search.md#stage-2-or-condition-workflow).
 
 There is no `--target`, internal album/library scope, `--model-dir`, `--state-dir`, default database or old command alias.
 
@@ -65,6 +78,7 @@ management folders show <folder-id> [--profile-id <profile-id>]
 management folders rename <folder-id> --name <new-name>
 management folders delete <folder-id>
 management folders add <folder-id> --ids-file <photo-ids.json> [--search-snapshot <candidates.json>]
+management folders add <folder-id> --ids-file <photo-ids.json> --query-snapshot <ranked.json>
 management folders remove <folder-id> --ids-file <photo-ids.json>
 ```
 
@@ -85,6 +99,14 @@ management folders add <folder-id> --ids-file <selected.json> --search-snapshot 
 ```
 
 `--search-snapshot` reuses `management.select_search_results` to validate album, candidate identity, selected subset and current selected photo/input/result identities in the membership transaction. It does not repeat the query, encode images or inspect their content. Selection still uses embedding-derived numbers only; do not automatically add all top-K, remove source memberships or treat folder labels as semantic evidence. Source scope/names remain historical even if source folders later change or disappear; selected photo identity changes are still stale errors.
+
+For explicitly selected finalized condition results, use:
+
+```text
+management folders add <folder-id> --ids-file <selected.json> --query-snapshot <ranked.json>
+```
+
+The two snapshot flags are mutually exclusive. A supplied JSON `null` is invalid, never plain-manual fallback. `condition_search.select_results` validates finalized stage, album, selected subset and current selected sources inside the explicit membership transaction before applying old membership logic. `[]` makes no changes. Response `source_query` is separate from existing `source_search`; neither source invokes a query, classification or model. Querying alone never adds folders or members.
 
 ### Plan and confirm EXIF date organization
 

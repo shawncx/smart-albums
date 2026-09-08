@@ -69,7 +69,7 @@ browse/search scope and confirmed one-time EXIF date plans. Reports use
 `album-snapshot-v2`, preserving historical scope even after folder changes.
 Stage-one [feature components](index.md#stage-1-six-opt-in-components) are explicit
 index operations, not new capabilities or automatic work when opening a file.
-Stage 2 OR search is implemented through separate [condition commands](search.md#stage-2-or-condition-workflow); targeted integration checks have passed. Metadata/semantic defaults are unchanged. All condition queries open the selected album read-only, without DDL, migration, defaults or automatic membership changes; private snapshots/public result pages are exports, not new tables.
+Stage 2 OR search is implemented through separate legacy [condition commands](search.md#stage-2-or-condition-workflow); targeted integration checks have passed. Explicit legacy metadata/semantic behavior is unchanged. New natural-content requests use [default unified search](search.md#unified-query-json): 100 globally deduplicated candidates by default, any explicitly requested positive count or `all`, compact numbered facts and snapshot-bound `review_id`. All queries open the selected album read-only, without DDL, migration, defaults or automatic membership changes; private snapshots/public evidence are exports, not new tables.
 
 ## Storage summary
 
@@ -78,7 +78,7 @@ The installed Skill needs these operational boundaries, not a repository schema-
 - The 32 ordinary tables hold album identity, photos/current previews and scans; six `image_embedding_*` tables; the two virtual-folder tables; and 19 feature tables for profiles, results, typed evidence, dependencies, settings, jobs, prototypes and pairs.
 - `image_ocr_documents` is authoritative saved text. `image_ocr_fts` and its four registered shadows are derived external-content FTS5 storage. Only explicit `index rebuild-fts --confirm` rebuilds it; open and search never perform repairs.
 - Paths locate originals, while saved content/profile/input identities govern reuse and current-result eligibility. Old profile/input results are not automatically deleted. Historical inspection is not current coverage or proof that dependencies remain intact.
-- `album-snapshot-v2` exports retain historical album/folder scope. OR queries use separate `condition-search-snapshot-v1` private snapshots and `condition-search-page-v1` public pages. These files are not tables, backups, live rules or authorization for membership writes.
+- Legacy `album-snapshot-v2` exports retain historical album/folder scope. Legacy OR queries use separate `condition-search-snapshot-v1` private snapshots and `condition-search-page-v1` public pages. Unified search uses private review/selected snapshots and compact numbered evidence. These files are not tables, backups, live rules or authorization for membership writes; no schema change or reindexing is needed.
 - Ordinary text-query vectors are transient; versioned scene prototypes are saved evidence. Models, Python environments and originals are outside SQLite and are not bundled with this Skill.
 
 Use [index](index.md) for exact-plan execution, source validation and recovery boundaries, [search](search.md) for snapshot selection, and the backup procedure below before moving an album. Do not edit tables, delete evidence or bypass a format error to emulate unsupported repair or migration.

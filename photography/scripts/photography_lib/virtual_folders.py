@@ -175,13 +175,22 @@ def _source_summary(selected):
     return source, selection
 
 
-def add_photos(folder_id, photo_ids, *, store, search_snapshot=None, query_snapshot=None):
+def add_photos(folder_id, photo_ids, *, store, search_snapshot=None, query_snapshot=None,
+               review_snapshot=None, review_id=None):
     _id(folder_id, "Folder")
-    ids = _ids(photo_ids, "Photo")
-    if search_snapshot is not None and query_snapshot is not None:
-        raise PhotographyError("INVALID_ARGUMENT", "Choose a search snapshot or a query snapshot, not both.")
+    if sum(value is not None for value in (search_snapshot, query_snapshot, review_snapshot)) > 1:
+        raise PhotographyError("INVALID_ARGUMENT", "Choose only one source search, query or review snapshot.")
+    if (review_snapshot is None) != (review_id is None):
+        raise PhotographyError("INVALID_ARGUMENT", "Use --review-snapshot and --review-id together for numbered selections.")
+    ids = _ids(photo_ids, "Photo") if review_snapshot is None else None
     with _write(store):
         store.folder(folder_id)
+        source_review = None
+        if review_snapshot is not None:
+            from .unified_search import select_for_folder
+
+            source_review = select_for_folder(review_snapshot, photo_ids, review_id=review_id, store=store)
+            ids = source_review["photo_ids"]
         for photo_id in ids:
             store.photo(photo_id)
         selected = None
@@ -202,6 +211,11 @@ def add_photos(folder_id, photo_ids, *, store, search_snapshot=None, query_snaps
             result["source_search"], result["selection"] = _source_summary(selected)
         if source_query is not None:
             result["source_query"] = source_query
+        if source_review is not None:
+            result.pop("photo_ids")
+            result["schema"] = "unified-search-folder-result-v1"
+            result["album"] = {"id": store.album()["id"]}
+            result["source_review"] = {key: value for key, value in source_review.items() if key != "photo_ids"}
     return result
 
 

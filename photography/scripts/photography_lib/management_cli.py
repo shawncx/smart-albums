@@ -54,6 +54,8 @@ def _folder_commands(actions):
             source = change.add_mutually_exclusive_group()
             source.add_argument("--search-snapshot", help="Validate IDs against saved semantic candidates; no new search.")
             source.add_argument("--query-snapshot", help="Validate IDs against finalized condition results; no new query.")
+            source.add_argument("--review-snapshot", help="Selected unified-search snapshot; --ids-file contains review numbers.")
+            change.add_argument("--review-id", help="Bind unified review numbers to their original review.")
     organize = commands.add_parser("organize-date", help="Prepare a read-only EXIF capture-date grouping plan.")
     source = organize.add_mutually_exclusive_group(required=True)
     source.add_argument("--all", dest="all_photos", action="store_true")
@@ -79,19 +81,25 @@ def add_commands(root_subparsers):
     single = actions.add_parser("photo", help="Inspect saved metadata without accessing the original.")
     single.add_argument("photo_id")
     _view_options(single, page=False)
-    search = actions.add_parser("search", help="Literal filename/path matching or exact image-embedding retrieval.")
-    search.add_argument("query")
-    search.add_argument("--visual-query", help="English visual intent prepared from the user's request; semantic mode only.")
-    search.add_argument("--mode", choices=("metadata", "semantic"), required=True)
+    search = actions.add_parser("search", help="Unified saved-evidence search with compact numbered review.")
+    search.add_argument("query", nargs="?")
+    search.add_argument("--query-file", help="Explicit unified-search-query-v1 with semantic and structured conditions.")
+    search.add_argument("--visual-query", help="English visual intent prepared from the user's request.")
+    search.add_argument("--mode", choices=("unified", "metadata", "semantic"), default="unified",
+                        help="Unified is the default; explicit metadata/semantic retain legacy snapshot contracts.")
     _view_options(search, page=False)
     _scope_options(search)
-    search.add_argument("--limit", type=int, help="1–1000; metadata default 100, semantic default 10.")
+    search.add_argument("--limit", type=_search_limit,
+                        help="Unified: positive count or all, default 100, no upper cap. Legacy modes: 1-1000.")
     search.add_argument("--after", help="Stable photo ID cursor; metadata search only.")
     selected = actions.add_parser("show-results", help="Display explicit IDs from a saved candidate snapshot; no new search or classification.")
     selected.add_argument("snapshot")
     selected.add_argument("--ids-file", required=True, help="JSON array selected by the agent/user; [] means no suitable candidates.")
     selected.add_argument("--output", help="Write a separate selected-results JSON snapshot.")
     selected.add_argument("--html", help="Write a report containing only the selected candidates.")
+    selected.add_argument("--review-id", help="Required for numbered decisions from a unified-search snapshot.")
+    evidence = actions.add_parser("search-evidence", help="Read compact numbered evidence from a saved unified search.")
+    evidence.add_argument("snapshot")
     locate = actions.add_parser("original", help="Locate an original and explicitly persist any path/status repair.")
     locate.add_argument("photo_id")
     relink = actions.add_parser("relink", help="Verify content and bind the photo to an explicit new original path.")
@@ -113,6 +121,20 @@ def add_commands(root_subparsers):
     from .condition_cli import add_commands as add_conditions
 
     add_conditions(actions)
+
+
+def _search_limit(value):
+    import argparse
+
+    if value == "all":
+        return value
+    try:
+        number = int(value)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError("Use a positive candidate count or all.") from exc
+    if number < 1:
+        raise argparse.ArgumentTypeError("Use a positive candidate count or all.")
+    return number
 
 
 def _protect_inputs(destinations, sources):
@@ -154,8 +176,12 @@ def _folder_command(args, store, config):
         query_snapshot = read_json_file(args.query_snapshot) if args.query_snapshot else None
         if args.query_snapshot is not None and not isinstance(query_snapshot, dict):
             raise PhotographyError("INVALID_ARGUMENT", "A supplied query snapshot must be a finalized JSON object.")
+        review_snapshot = read_json_file(args.review_snapshot) if args.review_snapshot else None
+        if args.review_snapshot is not None and not isinstance(review_snapshot, dict):
+            raise PhotographyError("INVALID_ARGUMENT", "A supplied review snapshot must be a selected JSON object.")
         return virtual_folders.add_photos(args.folder_id, ids, store=store, search_snapshot=snapshot,
-                                         query_snapshot=query_snapshot)
+                                         query_snapshot=query_snapshot, review_snapshot=review_snapshot,
+                                         review_id=args.review_id)
     if action == "organize-date":
         from .date_folders import plan_date_organization
 
@@ -174,6 +200,61 @@ def _folder_command(args, store, config):
     raise PhotographyError("INVALID_ARGUMENT", "Unknown virtual-folder operation.")
 
 
+def _unified_search(args, store, config):
+    from . import unified_search
+    from .cli import read_json_file
+
+    if not args.output:
+        raise PhotographyError("INVALID_ARGUMENT", "Unified search requires --output for its private source snapshot.")
+    if args.html or args.after is not None:
+        raise PhotographyError("INVALID_ARGUMENT", "Review numbered candidates before rendering; unified search has no --after.")
+    if args.query_file:
+        if (args.query is not None or args.visual_query is not None or args.profile_id is not None
+                or args.folder_ids is not None or args.folder_match is not None):
+            raise PhotographyError("INVALID_ARGUMENT", "Put query text, profiles and scope in --query-file; do not override them.")
+        raw = read_json_file(args.query_file)
+        if not isinstance(raw, dict):
+            raise PhotographyError("INVALID_ARGUMENT", "Expected a unified-search query JSON object.")
+    else:
+        if args.query is None:
+            raise PhotographyError("INVALID_ARGUMENT", "Provide a search query or --query-file.")
+        condition = {"id": "semantic", "kind": "semantic", "query": args.query}
+        if args.visual_query is not None:
+            condition["visual_query"] = args.visual_query
+        if args.profile_id is not None:
+            condition["profile_id"] = args.profile_id
+        raw = {"schema": unified_search.QUERY_SCHEMA, "query": args.query, "operator": "and",
+               "conditions": [condition],
+               "scope": {"folder_ids": args.folder_ids or [], "match": args.folder_match}}
+    if args.limit is not None:
+        raw = {**raw, "candidate_limit": args.limit}
+    output = prepare_export(args.output, config, store, (".json",))
+    _protect_inputs((output,), [args.query_file] if args.query_file else [])
+    snapshot = unified_search.query(raw, store=store, config=config)
+    evidence = unified_search.review(snapshot, store=store)
+    _write_json(snapshot, output)
+    return {**evidence, "model_calls": snapshot["query_model_calls"], "output": str(output)}
+
+
+def _unified_selection(args, snapshot, store, config):
+    from . import unified_search
+    from .cli import read_json_file
+
+    if args.review_id is None or not args.output:
+        raise PhotographyError("INVALID_ARGUMENT", "Unified selection requires --review-id and a separate --output snapshot.")
+    output = prepare_export(args.output, config, store, (".json",))
+    html_output = prepare_export(args.html, config, store, (".html",)) if args.html else None
+    _protect_inputs((output, html_output), (args.snapshot, args.ids_file))
+    selected = unified_search.select(snapshot, read_json_file(args.ids_file), review_id=args.review_id, store=store)
+    result = unified_search.summary(selected)
+    if html_output:
+        from .unified_report import unified_report
+
+        result["html_output"] = unified_report(selected, html_output, config=config, store=store)
+    _write_json(selected, output)
+    return {**result, "output": str(output)}
+
+
 def command(args, store, config):
     action = args.management_command
     if action in ("query", "query-evidence", "finalize-query", "show-query-results", "query-pairs"):
@@ -182,6 +263,27 @@ def command(args, store, config):
         return condition_command(args, store, config)
     if action == "folders":
         return _folder_command(args, store, config)
+    if action == "search-evidence":
+        from .cli import read_json_file
+        from .unified_search import review
+
+        return review(read_json_file(args.snapshot), store=store)
+    if action == "search":
+        if args.mode == "unified":
+            return _unified_search(args, store, config)
+        if args.query_file is not None or args.query is None:
+            raise PhotographyError("INVALID_ARGUMENT", "Legacy search requires query text, not --query-file.")
+        if args.limit == "all":
+            raise PhotographyError("INVALID_ARGUMENT", "Legacy search accepts limits 1-1000; use unified search for all candidates.")
+    if action == "show-results":
+        from .cli import read_json_file
+        from .unified_search import SNAPSHOT_SCHEMA
+
+        snapshot = read_json_file(args.snapshot)
+        if isinstance(snapshot, dict) and snapshot.get("schema") == SNAPSHOT_SCHEMA:
+            return _unified_selection(args, snapshot, store, config)
+        if args.review_id is not None:
+            raise PhotographyError("INVALID_ARGUMENT", "--review-id applies only to unified-search numbered selections.")
     if action == "original":
         return management.original(args.photo_id, store=store)
     if action == "relink":
@@ -210,7 +312,7 @@ def command(args, store, config):
     if action == "show-results":
         from .cli import read_json_file
         _protect_inputs((output, html_output), (args.snapshot, args.ids_file))
-        result = management.select_search_results(read_json_file(args.snapshot), read_json_file(args.ids_file), store=store)
+        result = management.select_search_results(snapshot, read_json_file(args.ids_file), store=store)
     elif action in ("create", "open"):
         result = management.album_info(**profile, view=action)
     elif action == "photos":

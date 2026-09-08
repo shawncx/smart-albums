@@ -53,8 +53,13 @@ def main(argv=None):
                 else:
                     from .management_cli import command
                 result = command(args, store, config)
-                result.setdefault("album", store.album())
-        print(json.dumps(result, ensure_ascii=False, indent=2, allow_nan=False))
+                if str(result.get("schema", "")).startswith("unified-search-"):
+                    result.setdefault("album", {"id": store.album()["id"]})
+                else:
+                    result.setdefault("album", store.album())
+        compact = str(result.get("schema", "")).startswith("unified-search-")
+        print(json.dumps(result, ensure_ascii=False, indent=None if compact else 2,
+                         separators=(",", ":") if compact else None, allow_nan=False))
         if result.get("interrupted"):
             return 130
         if result.get("status") == "blocked":

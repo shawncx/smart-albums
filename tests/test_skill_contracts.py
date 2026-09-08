@@ -36,6 +36,7 @@ QUERY_GUIDES = (
     ROOT / "photography" / "references" / "management.md",
     ROOT / "docs" / "index-design.md",
 )
+UNIFIED_GUIDES = QUERY_GUIDES[:-1]
 
 
 class SkillContractTests(unittest.TestCase):
@@ -157,6 +158,177 @@ class SkillContractTests(unittest.TestCase):
         self.assertEqual(encoded.vector, [0.6, 0.8, 0.0])
         self.assertEqual(encoded.model_calls, 1)
         self.assertEqual(encoded.token_counts, [2])
+
+    def test_unified_guides_route_new_requests_to_global_uncapped_candidates(self):
+        for document in UNIFIED_GUIDES:
+            text = document.read_text(encoding="utf-8").casefold()
+            with self.subTest(document=document.name):
+                for token in ("unified-search-query-v1", "natural-content requests", "legacy",
+                              "100", "deduplicat", "globally", "candidate_limit",
+                              "any positive integer", "no fixed upper count", "no 4 kib cap",
+                              "no byte-budget reduction", "beyond the requested 100",
+                              "--limit", "all", "--query-file", "--visual-query", "--profile-id",
+                              "scope", "more than one condition", '"and"', '"or"',
+                              "whole query", "not boolean truth", "unknown is not false",
+                              "hard clauses", "before semantic ranking", "top-k",
+                              "or must not filter other branches"):
+                    self.assertIn(token, text)
+        skill = (ROOT / "photography" / "SKILL.md").read_text(encoding="utf-8")
+        route = skill.split("### Default unified search: numbered evidence review", 1)[1].split(
+            "### Fixed semantic text preparation", 1)[0]
+        self.assertIn("`--mode` defaults to `unified`", route)
+        self.assertIn("Do not route them to the legacy semantic or per-condition OR workflows", route)
+        self.assertLess(skill.index("### Default unified search"), skill.index("### Legacy semantic display"))
+        self.assertIn("Plain input creates one semantic condition", route)
+        self.assertIn("those belong in the file", route)
+        self.assertIn("no database schema change", route)
+
+    def test_unified_guides_allow_requested_facts_but_only_numbered_private_review(self):
+        for document in UNIFIED_GUIDES:
+            text = document.read_text(encoding="utf-8").casefold()
+            with self.subTest(document=document.name):
+                for token in ("private snapshot", "compact", "number", "review_id",
+                              "requested saved structural facts", "hit state, not raw text",
+                              "coverage_items", "long hashes/profile ids", "paths", "pictures",
+                              "only a json array of integer candidate numbers", "[1,4]", "[]",
+                              "search-evidence", "--review-id", "--output <selected.json>",
+                              "summary only", "not full selected rows", "not visual verification",
+                              "subset of previously selected numbers", "--review-snapshot",
+                              "--search-snapshot", "--query-snapshot", "mutually exclusive",
+                              "thumbnails", "pixels", "untrusted data"):
+                    self.assertIn(token, text)
+        skill = (ROOT / "photography" / "SKILL.md").read_text(encoding="utf-8")
+        unified = skill.split("### Default unified search: numbered evidence review", 1)[1].split(
+            "### Fixed semantic text preparation", 1)[0]
+        for token in ("legacy numeric-only restriction does not apply",
+                      "Do not read private snapshots", "never blindly query all indexes",
+                      "Literal metadata and OCR do not translate or require a text encoder",
+                      "never automatic setup", "Do not pass image or thumbnail data to the agent"):
+            self.assertIn(token, unified)
+        self.assertNotIn("embedding-derived similarity information only", unified)
+        self.assertNotIn("condition-decisions-v1", unified)
+
+    def test_unified_guides_separate_optional_facts_from_logical_filters(self):
+        for document in UNIFIED_GUIDES:
+            text = document.read_text(encoding="utf-8").casefold()
+            with self.subTest(document=document.name):
+                for token in ("evidence_conditions", "nonsemantic typed conditions",
+                              "supporting facts", "not hard filters", "globally unique across both arrays",
+                              "missing or unknown optional evidence does not exclude candidates",
+                              "multiple-condition operator", "unrequested",
+                              "do not affect candidate eligibility or programmatic ranking"):
+                    self.assertIn(token, text)
+        text = (ROOT / "photography" / "references" / "search.md").read_text(encoding="utf-8")
+        section = text.split("## Unified query JSON", 1)[1].split("## Unified evidence", 1)[0]
+        self.assertIn("not a user-required filter", section)
+        self.assertIn("does not locate sky pixels", section)
+        self.assertIn("supporting entries neither add retrieval branches", section)
+        self.assertIn("Omission is equivalent to no supporting conditions", section)
+
+    def test_documented_unified_commands_parse_without_execution(self):
+        cli = parser()
+        commands = {
+            'management search "<query>" --visual-query "<English visual intent>" --output <private.json> [--limit N|all] [--profile-id <id>]': "search",
+            "management search --query-file <query.json> --output <private.json> [--limit N|all]": "search",
+            "management search-evidence <private.json>": "search-evidence",
+            "management show-results <private.json> --ids-file <numbers.json> --review-id <returned-id> --output <selected.json> [--html <report.html>]": "show-results",
+            "management folders add <folder-id> --review-snapshot <selected.json> --review-id <returned-id> --ids-file <numbers.json>": "folders",
+        }
+        values = {"query": "搜索带有天空的图片", "English visual intent": "sky"}
+        for document in UNIFIED_GUIDES[1:]:
+            text = document.read_text(encoding="utf-8")
+            for command, action in commands.items():
+                self.assertIn(command, text, document.name)
+                for optional in (False, True):
+                    for limit in ("1", "100", "10000000000000000", "all"):
+                        expanded = re.sub(r"\[([^\[\]]*)\]", r"\1" if optional else "", command)
+                        expanded = re.sub(r"<([^>]+)>", lambda item: values.get(item[1], item[1]), expanded)
+                        expanded = expanded.replace("N|all", limit)
+                        arguments = [arg[1:-1] if arg.startswith('"') and arg.endswith('"') else arg
+                                     for arg in shlex.split(expanded, posix=False)]
+                        with self.subTest(document=document.name, command=expanded):
+                            parsed = cli.parse_args(["--database", str(ROOT / "contract-only.sqlite"), *arguments])
+                            self.assertEqual(parsed.management_command, action)
+                            if action == "search":
+                                self.assertEqual(parsed.mode, "unified")
+                                self.assertEqual(parsed.output, "private.json")
+                                self.assertEqual(parsed.limit, (int(limit) if limit != "all" else "all")
+                                                 if optional else None)
+                                if parsed.query_file:
+                                    self.assertIsNone(parsed.query)
+                                    self.assertIsNone(parsed.visual_query)
+                                    self.assertIsNone(parsed.profile_id)
+                                else:
+                                    plan = semantic_query.prepare_query(parsed.query, parsed.visual_query)
+                                    self.assertEqual(plan["prompts"], ["sky"])
+                            elif action in ("show-results", "folders"):
+                                self.assertEqual(parsed.review_id, "returned-id")
+                                self.assertEqual(parsed.ids_file, "numbers.json")
+        for mode in ("semantic", "metadata", "unified"):
+            self.assertEqual(cli.parse_args([
+                "--database", str(ROOT / "contract-only.sqlite"), "management", "search", "sky",
+                "--mode", mode, "--output", "contract-only.json",
+            ]).mode, mode)
+
+    def test_documented_unified_json_preserves_original_typed_clauses_and_uncapped_limits(self):
+        from photography_lib import unified_queries
+        from photography_lib.config import PhotographyError
+
+        text = (ROOT / "photography" / "references" / "search.md").read_text(encoding="utf-8")
+        examples = [json.loads(block) for block in re.findall(r"```json\n(.*?)```", text, re.DOTALL)]
+        query = next(example for example in examples if example.get("schema") == unified_queries.QUERY_SCHEMA)
+
+        def profile(condition, store, cache):
+            return condition["profile_id"], {"parameters": {"labels": ["bird"], "score_threshold": 0.3}}
+
+        with patch.object(condition_queries, "_profile", side_effect=profile):
+            normalized = unified_queries.normalize_query(query, store=None)["query"]
+            self.assertEqual(normalized, query)
+            semantic, count = normalized["conditions"]
+            self.assertEqual(semantic["query"], query["query"])
+            self.assertEqual(semantic["visual_query"], "two birds in a blue sky")
+            self.assertEqual((count["kind"], count["operator"], count["value"]), ("object_count", "eq", 2))
+            supporting = normalized["evidence_conditions"]
+            self.assertEqual(len(supporting), 1)
+            self.assertEqual((supporting[0]["kind"], supporting[0]["color"]), ("color_fraction", "blue"))
+            self.assertNotIn(supporting[0], normalized["conditions"])
+            single = {key: value for key, value in query.items() if key != "operator"}
+            single["conditions"] = [semantic]
+            result = unified_queries.normalize_query(single, store=None)["query"]
+            self.assertEqual(result["conditions"], [semantic])
+            self.assertEqual(result["evidence_conditions"], supporting)
+            without_support = {key: value for key, value in query.items() if key != "evidence_conditions"}
+            result = unified_queries.normalize_query(without_support, store=None)["query"]
+            self.assertEqual(result.get("evidence_conditions", []), [])
+            for invalid_support in ([{**supporting[0], "id": semantic["id"]}],
+                                    [{**semantic, "id": "supporting-semantic"}]):
+                with self.subTest(invalid_support=invalid_support), self.assertRaises(PhotographyError):
+                    unified_queries.normalize_query({**query, "evidence_conditions": invalid_support}, store=None)
+            without_limit = {key: value for key, value in query.items() if key != "candidate_limit"}
+            self.assertEqual(unified_queries.normalize_query(without_limit, store=None)["query"]["candidate_limit"],
+                             100)
+            for limit in (1, 100, 1001, 10 ** 16, "all"):
+                with self.subTest(limit=limit):
+                    result = unified_queries.normalize_query({**query, "candidate_limit": limit}, store=None)
+                    self.assertEqual(result["query"]["candidate_limit"], limit)
+            for operator in ("and", "or"):
+                result = unified_queries.normalize_query({**query, "operator": operator}, store=None)
+                self.assertEqual(result["query"]["operator"], operator)
+            with self.assertRaises(PhotographyError):
+                unified_queries.normalize_query({key: value for key, value in query.items() if key != "operator"},
+                                                store=None)
+            for limit in (0, -1, True, 1.5, None, "100", "ALL"):
+                with self.subTest(invalid_limit=limit), self.assertRaises(PhotographyError):
+                    unified_queries.normalize_query({**query, "candidate_limit": limit}, store=None)
+
+    def test_unified_approval_does_not_approve_unrelated_deferred_repairs(self):
+        text = (ROOT / "docs" / "code-review-follow-up.zh-CN.md").read_text(encoding="utf-8")
+        self.assertIn("已另行批准：统一检索与紧凑证据选择", text)
+        self.assertIn("无固定数量上限、无 4 KiB 字节上限、无按字节自动减量", text)
+        self.assertIn("不再将它们整体标为延期", text)
+        for heading in ("## 3. 延期：R2", "## 4. 延期：R4", "## 5. 延期：R6"):
+            section = text.split(heading, 1)[1].split("\n## ", 1)[0]
+            self.assertIn("状态：未批准", section)
 
     def test_benchmark_guides_limit_claims_to_proxy_labels_and_tested_queries(self):
         for document in QUERY_GUIDES:
@@ -293,7 +465,9 @@ assert worker_python(arguments.worker_python) == Path(sys.executable).resolve()
 sys.argv = sys.argv[1:]
 runpy.run_path(str(entrypoint), run_name="__main__")
 """
-            for command in ([], ["ingestion"], ["index"], ["management"]):
+            for command in ([], ["ingestion"], ["index"], ["management"], ["management", "search"],
+                            ["management", "search-evidence"], ["management", "show-results"],
+                            ["management", "folders", "add"]):
                 with self.subTest(command=command):
                     result = subprocess.run(
                         [sys.executable, "-I", "-B", "-c", probe, str(entrypoint), *command, "--help"],
@@ -344,9 +518,9 @@ runpy.run_path(str(entrypoint), run_name="__main__")
         self.assertNotIn("planned but not implemented", section)
         self.assertNotIn("otherwise `PHOTOGRAPHY_STATE_DIR`", text)
 
-    def test_semantic_display_decisions_never_send_images_to_agent(self):
+    def test_legacy_semantic_display_decisions_never_send_images_to_agent(self):
         text = (ROOT / "photography" / "SKILL.md").read_text(encoding="utf-8")
-        section = text.split("### Default semantic display: embedding-only selection", 1)[1].split(
+        section = text.split("### Legacy semantic display: embedding-only selection", 1)[1].split(
             "### Explicit original-path maintenance", 1)[0]
         for phrase in ("Do not pass image or thumbnail data to the agent",
                        "embedding-derived similarity information only",
@@ -426,6 +600,7 @@ runpy.run_path(str(entrypoint), run_name="__main__")
             "management folders delete <folder-id>",
             "management folders add <folder-id> --ids-file <photo-ids.json> [--search-snapshot <candidates.json>]",
             "management folders add <folder-id> --ids-file <photo-ids.json> --query-snapshot <ranked.json>",
+            "management folders add <folder-id> --review-snapshot <selected.json> --review-id <returned-id> --ids-file <numbers.json>",
             "management folders remove <folder-id> --ids-file <photo-ids.json>",
             "management folders organize-date --all --granularity year|month|day --output <date-plan.json>",
             "management folders organize-date --ids-file <photo-ids.json> --granularity year|month|day --output <date-plan.json>",
@@ -441,8 +616,8 @@ runpy.run_path(str(entrypoint), run_name="__main__")
     def test_folder_scope_is_explicit_and_precedes_semantic_ranking(self):
         text = (ROOT / "photography" / "SKILL.md").read_text(encoding="utf-8")
         section = text.split("### Scoped browsing and search", 1)[1].split(
-            "### Default semantic display", 1)[0]
-        for phrase in ("`management photos` and both `management search` modes",
+            "### Default unified search", 1)[0]
+        for phrase in ("`management photos` and all `management search` modes",
                        "repeatable `--folder-id <id>`", "--folder-match union|intersection",
                        "Multiple distinct folder IDs require an explicit match operator",
                        "repeating the same ID is not a second folder",
@@ -501,9 +676,9 @@ runpy.run_path(str(entrypoint), run_name="__main__")
                        "Later imports and manually removed photos are never automatically regrouped"):
             self.assertIn(phrase, section)
 
-    def test_folder_labels_and_date_metadata_cannot_replace_semantic_evidence(self):
+    def test_legacy_folder_labels_and_date_metadata_cannot_replace_semantic_evidence(self):
         text = (ROOT / "photography" / "SKILL.md").read_text(encoding="utf-8")
-        section = text.split("### Default semantic display: embedding-only selection", 1)[1].split(
+        section = text.split("### Legacy semantic display: embedding-only selection", 1)[1].split(
             "### Optional one-time organization", 1)[0]
         for phrase in ("Do not pass image or thumbnail data to the agent",
                        "semantic relevance/display decisions must use embedding-derived similarity information only",
@@ -682,7 +857,7 @@ runpy.run_path(str(entrypoint), run_name="__main__")
                                       r"|(?:not|never)[^.\n]{0,100}automatic downloads)")
         self.assertTrue((ROOT / "photography" / "requirements-features.txt").is_file())
 
-    def test_stage_two_search_records_targeted_acceptance_without_changing_defaults(self):
+    def test_stage_two_search_records_targeted_acceptance_and_legacy_compatibility(self):
         documents = [ROOT / "README.md", ROOT / "photography" / "SKILL.md", ROOT / "docs" / "index-design.md"]
         documents += list((ROOT / "photography" / "references").glob("*.md"))
         for document in documents:
@@ -709,10 +884,12 @@ runpy.run_path(str(entrypoint), run_name="__main__")
                 self.assertNotIn("future short-query path", text)
                 self.assertNotIn("does **not** implement OCR/OR search now", text)
 
-    def test_stage_two_skill_uses_only_numeric_evidence_not_private_matrices_or_images(self):
+    def test_legacy_stage_two_skill_uses_only_numeric_evidence_not_private_matrices_or_images(self):
         skill = (ROOT / "photography" / "SKILL.md").read_text(encoding="utf-8")
         section = skill.split("### Stage 2: OR condition queries and private semantic review", 1)[1].split(
             "### Optional one-time organization", 1)[0]
+        self.assertIn("Legacy only, not the route for new natural-content requests", section)
+        self.assertIn("policies in this section apply only to these legacy commands", section)
         for phrase in ("Do not read the private snapshot file or its feature matrix",
                        "Do not use OCR snippets, scene labels, feature cells",
                        "query-evidence", "candidate_rank", "score_gap_from_best", "score_gap_to_next",

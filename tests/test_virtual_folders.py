@@ -117,6 +117,7 @@ class VirtualFolderTests(unittest.TestCase):
         self.encoder = FakeEncoder(self.profile)
 
     def search(self, **kwargs):
+        kwargs.setdefault("visual_query", "synthetic photos")
         return management.semantic_search("合成照片", store=self.store, encoder=self.encoder, **kwargs)
 
     def test_create_custom_empty_folder_without_index_or_source_io(self):

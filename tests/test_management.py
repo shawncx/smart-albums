@@ -741,7 +741,7 @@ class ManagementTests(unittest.TestCase):
         self.assertEqual(result["limit"], 10)
         self.assert_error("INVALID_ARGUMENT", self.command, "search", "x", "--mode", "semantic", "--after", "")
         for arguments in (
-            ("albums",), ("album", "x"), ("album-create", "x"), ("search", "query"),
+            ("albums",), ("album", "x"), ("album-create", "x"),
             ("photos", "--album-id", "a"), ("photos", "--library-id", "b"),
             ("search", "x", "--mode", "metadata", "--target", "photos"),
             ("search", "x", "--mode", "semantic", "--model-dir", "x"),

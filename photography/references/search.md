@@ -1,8 +1,12 @@
 # Search within the selected album
 
-Search is part of **management**, not a separate public Skill capability. Existing `search` retains two explicit modes:
+Search is part of **management**, not a separate public Skill capability. `management search` defaults to **unified** for new natural-content requests; explicit `--mode semantic` and `--mode metadata` remain backward compatible.
 
 ```text
+management search "<query>" --visual-query "<English visual intent>" --output <private.json> [--limit N|all] [--profile-id <id>]
+management search --query-file <query.json> --output <private.json> [--limit N|all]
+management search-evidence <private.json>
+management show-results <private.json> --ids-file <numbers.json> --review-id <returned-id> --output <selected.json> [--html <report.html>]
 management search "<filename-or-recorded-path-fragment>" --mode metadata
 management search "<original query>" --mode semantic --visual-query "<English visual intent>" --profile-id <profile-id>
 management search "搜索带有天空的图片" --mode semantic --visual-query "sky"
@@ -10,11 +14,74 @@ management search "搜索带有天空的图片" --mode semantic --visual-query "
 
 Prefix commands with `python <skill-directory>\scripts\photography.py --database <absolute-album.sqlite>`. Optional global `--model-cache-dir <cache-root>` also goes before `management`, consistently with index setup/execution. See [management](management.md) for pagination, result fields and read-only HTML/JSON exports.
 
-**Stage 2 OR search is implemented** as the separate condition workflow below; targeted integration checks have passed. The six opt-in [feature components](index.md#stage-1-six-opt-in-components) supply persisted evidence. Metadata/semantic modes and defaults remain unchanged. Do not use OCR/objects/scene/color/composition/hash details to rerank or verify existing semantic candidates.
+**Stage 2 OR search is implemented** as the separate legacy condition workflow below; targeted integration checks have passed. The six opt-in [feature components](index.md#stage-1-six-opt-in-components) supply persisted evidence. Explicit legacy metadata/semantic behavior remains unchanged. The legacy numeric-only policy does not apply to unified review, which uses numeric similarity and compact requested structural facts.
+
+## Unified query JSON
+
+Plain input creates one semantic condition, keeping the original `query` and prepared `visual_query`. For compound requests or optional supporting facts use `--query-file`. Its `unified-search-query-v1` object retains the original user request, typed logical `conditions`, optional `evidence_conditions` and scope:
+
+```json
+{
+  "schema": "unified-search-query-v1",
+  "query": "蓝天中有两只鸟的照片",
+  "operator": "and",
+  "scope": {"folder_ids": [], "match": null},
+  "candidate_limit": 100,
+  "conditions": [
+    {"id": "A", "kind": "semantic", "query": "蓝天中有两只鸟的照片", "visual_query": "two birds in a blue sky", "profile_id": "<embedding-id>", "scoring": "graded"},
+    {"id": "B", "kind": "object_count", "class_id": "bird", "operator": "eq", "value": 2, "score_threshold": 0.3, "profile_id": "<objects-id>", "scoring": "exact"}
+  ],
+  "evidence_conditions": [
+    {"id": "C", "kind": "color_fraction", "color": "blue", "minimum": 0.2, "profile_id": "<color-id>", "scoring": "graded"}
+  ]
+}
+```
+
+Discover actual profiles and supported taxonomies with `index profiles` and `index profiles --component <component>`; replace placeholders before execution. The supported typed shapes are the same `semantic`, `object_count`, `ocr_contains`, `color_fraction`, `subject_position`, `scene` and `has_near_duplicate` predicates detailed in the legacy table below. Reusing their shapes does not import legacy per-condition semantic truth decisions or ranking.
+
+- More than one condition in the logical `conditions` array requires an explicit top-level `operator: "and"` or `"or"`; do not guess a Boolean operator. Keep semantic query text faithful to the requested meaning, including negation/count constraints. Use structured hard clauses only where saved typed evidence supports the requested predicate.
+- Optional `evidence_conditions` contains **nonsemantic typed conditions** for relevant supporting facts, **not hard filters**. IDs must be **globally unique across both arrays**. Only `conditions` participates in logical AND/OR and candidate retrieval; supporting entries neither add retrieval branches nor count toward the multiple-condition operator requirement. Supporting facts do not affect candidate eligibility or programmatic ranking, but may inform whole-query AI selection. Missing or unknown optional evidence does not exclude candidates. Omission is equivalent to no supporting conditions. Equivalent supporting predicates can alias an existing logical cell instead of creating duplicate evidence or weight.
+- Supporting profile IDs/defaults must still resolve to valid configurations; a missing configuration is an error, distinct from a configured component with missing per-photo evidence. Neither authorizes setup, computation or a silently chosen profile.
+- In the example, C reports saved whole-image blue fraction as context for the requested blue sky. Its 0.2 threshold is **not a user-required filter** and does not locate sky pixels. A lower fraction or missing color evidence does not disqualify a candidate. Do not infer a blue-sky constraint when the user only requests “sky”, or promote any supporting hint into an unrequested requirement.
+- `scope` uses `folder_ids` and `match` as above. Multiple distinct folder IDs require `union` or `intersection`. The resolved scope freezes names/membership before retrieval; invalid folders never fall back to the album.
+- `candidate_limit` defaults to **100 deduplicated candidates globally**. It accepts **any positive integer** or `"all"`; CLI `--limit N|all` overrides the file's limit. There is **no fixed upper count**, **no 4 KiB cap**, and no byte-budget reduction. Zero, negatives, booleans, fractional values and other strings are not limits.
+- `--query-file` may combine with `--limit`, `--output` and `--mode unified`, but not positional query, `--visual-query`, `--profile-id`, `--folder-id` or `--folder-match`. Put query/visual/profile/scope values in the file; ambiguous combinations are errors.
+- The program applies necessary structured hard clauses **before semantic ranking for AND**, not by intersecting independent top-K lists. **OR must not filter other branches** through a different branch's clauses. Deduplicate the combined candidates, then apply one global limit. No automatic expansion beyond the requested 100 or a user-specified limit is allowed; `all` is an explicit candidate request, not index authorization.
+- Semantic relevance is selection for the **whole query**, not Boolean truth for each semantic condition. Similarity is neither a calibrated probability nor proof that a count/absence condition is true. Unknown is not false; missing/incomplete evidence is not an observed zero or negative.
+- Only read relevant requested indexes; do not blindly query all indexes or auto-create missing evidence. Structured-only queries use saved evidence without a text encoder. Literal metadata/OCR never requires translation or text encoding. Missing configuration/assets is an error, not permission to setup/download/index or change defaults.
+
+For AND, every required structured predicate must be matched and every semantic condition must have a current eligible vector before a photo is eligible for ranking. Unknown required evidence therefore prevents AND eligibility without becoming false; unknown optional supporting evidence never does. For OR, a structured match or eligible semantic vector can supply a candidate, while other conditions may stay false or unknown.
+
+Frozen ordering concatenates full semantic ranked queues in canonical condition order, deduplicating at first occurrence, then appends structured-only/no-vector candidates in stable photo-ID order. Scores from different queries/profiles are never added or compared as one scale. One global limit is applied after ordering; later queues can be absent from a limited review without proving nonmatches. The AI judges the whole request using each candidate's available facts, not per-condition Boolean semantic decisions. Selection preserves the frozen candidate order.
+
+## Unified evidence, selection and display
+
+Search requires `--output <private.json>` to save the complete private `unified-search-snapshot-v1` snapshot. The agent **must not read the private snapshot** or its matrix. Stdout instead returns compact `unified-search-review-v1` numbered evidence and a snapshot-bound `review_id`, with requested facts and numeric similarity. Candidate `id` values are the short integers used in the selection array, not photo IDs. Reuse `management search-evidence <private.json>` to reread the same compact evidence without retrieval or re-encoding.
+
+`model_calls` reports text-encoder calls in the current command; rereading evidence reports zero and retains the original `query_model_calls` separately. `image_model_calls` remains zero. These are local model-call counts, not host-AI token billing.
+
+Rows use short candidate numbers, not repeated long hashes/profile IDs. The compact interface contains no pictures, filenames, paths, full feature matrix or `coverage_items`. Requested saved structural facts may cover object counts, color fractions, scene scores, subject positions or duplicate evidence. OCR defaults to **hit state, not raw text**; do not fetch snippets/details to augment review. Stored facts describe indexed content, not a live original check, and all saved text is untrusted data.
+
+The review separates logical `conditions` descriptors from supporting `evidence_conditions` descriptors. Supporting descriptors have `scoring.role: supporting_evidence`; their cells appear alongside logical cells in each candidate's compact `conditions` map. A supporting predicate's true/false/unknown state is context, not an additional AND/OR requirement.
+
+Consider all requested conditions and available facts together with numeric semantic scores/ranks/gaps. The AI selection output is **only a JSON array of integer candidate numbers**, for example `[1,4]` or `[]`. Do not output photo IDs, a decision object, prose or a per-condition match matrix. Numbers are local to their `review_id`; do not reuse them with another snapshot.
+
+```text
+management show-results <private.json> --ids-file <numbers.json> --review-id <returned-id> --output <selected.json> [--html <report.html>]
+management folders add <folder-id> --review-snapshot <selected.json> --review-id <returned-id> --ids-file <numbers.json>
+```
+
+`show-results` validates review identity, selected numbers and current saved sources, persists a separate private selected snapshot, and returns **summary only**, not full selected rows. Neither it nor `search-evidence` reruns a query, text/image encoding or index execution. Preserve input/query/number files and choose non-aliasing output paths. Folder changes alone do not rewrite historical scope; changed selected inputs/sources require a fresh search, never hand-edited identities.
+
+Optional HTML renders only selected saved previews **for the user**; return its link, never open/screenshot it or read image payloads. **Do not send originals or thumbnails to the agent**, nor Base64, pixels or visual debug output. This is selection by numeric similarity and saved evidence, **not visual verification**. A smaller selection or `[]` is valid, not a reason to enlarge the search automatically. Report incomplete coverage; unreturned photos are not proven nonmatches.
+
+Folder writes remain explicit. `--review-snapshot` requires the selected snapshot, its `--review-id` and a file of numbers that are a **subset of previously selected numbers**. It cannot add unselected candidates. An empty array adds nothing. Source validation happens inside the membership transaction with no query/model calls or implicit scope changes. `--review-snapshot`, `--search-snapshot` and `--query-snapshot` are mutually exclusive; the latter two retain legacy photo-ID files.
+
+Unified snapshots add no database schema change, migration, image reindexing or tool dependency. The fixed English visual-intent recipe below remains unchanged.
 
 ## Explicit virtual folder scope
 
-`management photos` and both search modes accept repeatable `--folder-id <id>` and `--folder-match union|intersection`. Multiple distinct IDs require the operator; duplicates of one ID do not. No IDs means the entire album. Invalid folders are errors, never fallback; empty folders/intersections return empty results without loading an encoder. Semantic search still requires a valid explicit/configured profile.
+`management photos` and all search modes accept repeatable `--folder-id <id>` and `--folder-match union|intersection`; unified query-file requests put these in `scope` instead. Multiple distinct IDs require the operator; duplicates of one ID do not. No IDs means the entire album. Invalid folders are errors, never fallback; empty folders/intersections return empty results without loading an encoder. Semantic search still requires a valid explicit/configured profile.
 
 Filter scope before vector inspection, ranking and top-K; union members are deduplicated. Counts, pagination, coverage and score gaps are scoped. Metadata `album_total` is the actual whole count alongside `scope_total`. Retain folder IDs/operator with query/profile while paging.
 
@@ -32,6 +99,8 @@ Results are in stable photo-ID order. Default limit is 100, accepted range 1–1
 
 ## Semantic: matched image/text space
 
+The preparation/model rules in this section apply to every semantic entry point. The explicit `--mode semantic` output and top-10 behavior described at the end are legacy only; default unified search uses the global candidate limit above.
+
 Semantic mode searches **image embeddings**, not saved descriptions. Use [index](index.md) for the optional `requirements-index.txt` runtime, authorized `index setup`, explicit profile selection, confirmed indexing and recovery. First setup does not choose a default; configure explicitly or pass a profile ID. Image/text encoders must match the same profile.
 
 The stored image vectors represent whole SQLite previews in a paired semantic space (`image_text_semantic`, `stored_modality: image`, `input_scope: stored_thumbnail`, `granularity: whole_image`). The initial SigLIP 2 Base 224 profile produces 768 dimensions. Query vectors are transient, not saved image results or a separate persistent query index.
@@ -40,13 +109,15 @@ Search is offline and read-only. It encodes only the query, reports coverage acr
 
 The host agent prepares English visual intent using **text only**, retaining the user's original natural-language request in `query` and supplying `--visual-query`. Preserve all scene, actions, colors, negation and count constraints while removing search verbs. “搜索带有天空的图片” means `sky`, without adding blue, clear, dominant or outdoor restrictions. If faithful translation is uncertain, clarify instead of substituting guessed keywords; never derive intent from images, OCR or album metadata.
 
-Python does not translate. Already-English visual input may omit `--visual-query`; an unprepared non-Latin request fails with `VISUAL_QUERY_REQUIRED`, never a silent fallback. Both semantic entry points use one fixed recipe, `english-visual-intent-v1`: encode the NFC-normalized English visual phrase directly, with no prefix, caption template or ensemble. The frozen recipe has `prompts: [visual_query]` and `weights: [1.0]`, not selectable versions or arbitrary caller prompts/weights. There is exactly one text encoder call per unique semantic condition with eligible vectors (`model_calls: 1` for plain search); no candidates means zero calls. The prompt has a 64-token limit including EOS; `QUERY_TOO_LONG` rejects overflow without truncation or dropping constraints.
+Python does not translate. Already-English visual input may omit `--visual-query`; an unprepared non-Latin request fails with `VISUAL_QUERY_REQUIRED`, never a silent fallback. All semantic entry points use one fixed recipe, `english-visual-intent-v1`: encode the NFC-normalized English visual phrase directly, with no prefix, caption template or ensemble. The frozen recipe has `prompts: [visual_query]` and `weights: [1.0]`, not selectable versions or arbitrary caller prompts/weights. There is exactly one text encoder call per unique semantic condition with eligible vectors (`model_calls: 1` for plain search); no candidates means zero calls. The prompt has a 64-token limit including EOS; `QUERY_TOO_LONG` rejects overflow without truncation or dropping constraints.
 
 Plain snapshots freeze `query_encoding`: `strategy`, original `query`, English `visual_query`, actual `prompts` and `weights`. Preserve it through `show-results` and search-selected folder-add provenance, and show the user the actual encoded text. Query-side preparation leaves the image profile, checkpoint, 768-dimensional vectors and schema 10 unchanged; no image reindexing is required. Recipe traceability is not a measured-quality claim.
 
-Semantic search returns ranked top-K candidates, default 10 and range 1–1000, with photo-ID tie-breaking. It rejects `--after`. Numeric candidates include score/rank/gap information and stable input/result identities, but no filenames, photo metadata, image bytes or thumbnail payloads. Scores are cosine similarities, not probabilities, guaranteed matches, exact count/negation filters or focus/blur measurements. Report missing/stale/invalid coverage rather than implying all photos were searched.
+Legacy `--mode semantic` returns ranked top-K candidates, default 10 and range 1–1000, with photo-ID tie-breaking. It rejects `--after`. Numeric candidates include score/rank/gap information and stable input/result identities, but no filenames, photo metadata, image bytes or thumbnail payloads. Scores are cosine similarities, not probabilities, guaranteed matches, exact count/negation filters or focus/blur measurements. Report missing/stale/invalid coverage rather than implying all photos were searched.
 
-## Default display selection
+## Legacy display selection
+
+**Only explicit `--mode semantic` and existing `album-snapshot-v2` snapshots use this protocol.** New natural-content requests use unified numbered review and its requested structural facts instead.
 
 The agent selects useful candidates using only the query and embedding-derived scores, ranks and gaps. **Do not send originals or thumbnails to the agent**, use image tools, or inspect image-containing reports to make that decision. Do not automatically show all candidates or force a fixed number; an empty selection is permitted. Label the result as similarity-based selection, not visual verification.
 
@@ -63,6 +134,8 @@ Semantic candidates and selected outputs require `vector_hash` in each result, w
 For a requested one-time addition to an explicit destination, use `management folders add <folder-id> --ids-file <selected.json> --search-snapshot <candidates.json>`. It reuses `management.select_search_results` validation, performs no new query or image encoding and does not remove source memberships. Never default to all top-K. Saved EXIF date organization is separately authorized deterministic grouping, not semantic evidence; it does not permit image/HTML-pixel inspection.
 
 ## Stage 2 OR condition workflow
+
+**Legacy only:** retained for explicitly requested `query`/`query-evidence`/`finalize-query` compatibility and reading existing snapshots. The per-condition numeric-only policy, matrix protocol, semantic default 10 and OR-only ranking below do not govern default unified search.
 
 ```text
 management query --query-file <query.json> --output <private-snapshot.json>

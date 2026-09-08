@@ -1,14 +1,15 @@
-# Portable album, image embeddings and stage-one feature design
+# Portable album, local features and AI review design
 
-This is the current schema 10 contract, including stage-one feature indexing and read-only queries, not a benchmark. The [portable-album plan](portable-album-plan.md) records the earlier schema 8 milestone; this document supersedes its format/scope contract without rewriting that history. See [validation status](TODO.md) for the tested scope. The [earlier plan](ingestion-index-management-plan.md) is also historical, not a live progress record. **Stage 2 OR search is implemented** and remains available through legacy management commands. Default content search now uses the [unified numbered-review workflow](../photography/references/search.md); explicit legacy metadata/semantic modes preserve their existing contracts.
+This is the current schema 11 contract, including local feature indexing, read-only queries and optional AI review, not a benchmark. The [portable-album plan](portable-album-plan.md) records the earlier schema 8 milestone and schema 10 follow-up; this document supersedes its format/scope contract without rewriting that history. See [validation status](TODO.md) for the tested scope. The [earlier plan](ingestion-index-management-plan.md) and [code-review follow-up](code-review-follow-up.zh-CN.md) are historical, not live progress records. **Stage 2 OR search is implemented** and remains available through legacy management commands. Default content search uses the [unified numbered-review workflow](../photography/references/search.md), distinct from cloud photography review; explicit legacy metadata/semantic modes preserve their existing contracts.
 
-## 1. Exactly three public capabilities
+## 1. Exactly four public capabilities
 
 | Capability | Responsibility | Boundary |
 | --- | --- | --- |
 | ingestion | Import sources, metadata, dual original paths and proportional SQLite JPEG previews | No inference, automatic indexing or original deletion |
 | index | Explicit setup/configure/plan/execute/status/job/resume for image embeddings and opt-in OCR/objects/scene/color/composition/perceptual_hash, plus result/history, prototype plans and comparisons | No description intermediate, cloud fallback, automatic upstream indexing or search behavior change |
 | management | Album-file create/open/backup, manual virtual folders, scoped photo browse/search, one-time date organization, preview/scan diagnostics and original/relink | Browse/search is read-only; no internal albums, selection widgets, automatic regrouping or photo deletion |
+| review | Local plan, explicit whole-task approval, optional Copilot JPEG-preview review, structured results/history and approved recovery | No automatic contact, originals, ranking, search integration, retry/fallback or migration |
 
 These are independent operations within one `smart-albums` Skill. **One album is one SQLite file**, not a container of user-selected internal albums. Select/open or explicitly create the file before data operations; informational questions and `--help` need no file. Switching files clears previous photo/profile/run/folder choices and pending confirmations.
 
@@ -19,16 +20,16 @@ Global `--database <absolute-file>` is required, accepts `.sqlite`, `.sqlite3` a
 - `SQLiteStorage.create(path)` exclusively claims a nonexistent destination, then initializes in a transaction. The destination parent must already exist. It cannot overwrite an existing file; failure cleans up only the file it owns.
 - `SQLiteStorage.open(path, writable=False)` opens an existing file with SQLite URI `mode=ro`; explicit writers use `mode=rw`, never automatic-create mode.
 - Open verifies the application marker/version, exact table set, required columns, one valid album metadata row, integrity and foreign keys. It performs no DDL, automatic repair, cleanup or migration.
-- New albums use `PRAGMA application_id = 0x53414C42`, `PRAGMA user_version = 10` and rollback journaling rather than default WAL. Commands close connections on completion.
-- Missing/invalid/unrelated/unsupported files and storage access failures are errors, not creation permission. **Existing v1–v9 databases are rejected unchanged.** The user's old database/backups remain untouched; there is no migration and a new file is not an implicit conversion.
+- New albums use `PRAGMA application_id = 0x53414C42`, `PRAGMA user_version = 11` and rollback journaling rather than default WAL. Commands close connections on completion.
+- Missing/invalid/unrelated/unsupported files and storage access failures are errors, not creation permission. **Existing v1–v10 databases are rejected unchanged.** The user's old database/backups remain untouched; there is no migration and a new file is not an implicit conversion.
 
 Management create/open returns `album: {id, name, database_path, ...}`. The ID is a stable UUID; the name is the current filename without extension. Moving/renaming changes location/display name, not identity. Backups/copies retain the UUID and are not independently mergeable branches.
 
 Plain open/browse/search uses read-only storage and never stats originals or writes path repair. `management original`/`relink` are explicit path-maintenance exceptions: they first resolve/check, then open a writer only when persistence is needed. A usable path whose repair cannot be saved is reported as an error with `persisted: false`, not success or missing data.
 
-## 3. Schema 10: 37 registered tables
+## 3. Schema 11: 40 registered tables
 
-The actual schema contains **32 ordinary tables + one external-content FTS5 virtual table + four shadow tables = 37 registered tables**. SQLite additionally owns `sqlite_sequence` for pair IDs; it is not a registered application/FTS table (38 table entries including it). The previous 13 ordinary tables below remain, including the unchanged six `image_embedding_*` tables:
+The actual schema contains **35 ordinary tables + one external-content FTS5 virtual table + four shadow tables = 40 registered tables**. SQLite additionally owns `sqlite_sequence` for pair IDs; it is not a registered application/FTS table (41 table entries including it). The previous 13 ordinary tables below remain, including the unchanged six `image_embedding_*` tables:
 
 | Table | Purpose |
 | --- | --- |
@@ -69,6 +70,16 @@ Nineteen additional ordinary tables separate new feature evidence from embedding
 | `image_composition_features` | Nullable selected-subject geometry, union/bounding areas and uncovered fraction |
 | `image_perceptual_hashes` | Versioned dHash64 algorithm/bits/BLOB fingerprint |
 | `image_similarity_pairs` | Ordered endpoints, source versions/results, metric/distance and comparison-run provenance |
+
+Three ordinary review tables are separate from local feature evidence:
+
+| Table | Purpose |
+| --- | --- |
+| `ai_review_results` | Immutable validated per-photo reviews: typed score/text projections, fixed versioned JSON, input/configuration identity and provider/model/rubric provenance |
+| `ai_review_runs` | Frozen whole-task plans/digests, selected/cached references, approval, attempts and summaries |
+| `ai_review_batches` | Ordered input manifests, batch membership/status, attempts and sanitized errors/metadata |
+
+There is one review score/result table, not one table per dimension. `description TEXT`, `composition_score`, `lighting_score`, `color_score`, `subject_score`, `storytelling_score`, `technical_score` and `overall_score` are derived from the same validated `payload_json`. Fixed paths such as `$.scores.composition.reason`, `$.strengths[0]`, `$.improvements[0]` and `$.limitations[0]` retain structured text. Numeric range/type, JSON schema/projection consistency, foreign keys and uniqueness per photo/successful batch protect the storage boundary. Queryable typed columns/indexes and fixed JSON paths support future SQL filtering without AI or prose reparsing; there is no review-aware public search/ranking entry in v1 and no new FTS. Explicit fresh review appends history, so the reuse key is not globally unique.
 
 FTS is registered explicitly, not by arbitrary suffix acceptance:
 
@@ -185,7 +196,7 @@ management search "搜索带有天空的图片" --mode semantic --visual-query "
 
 Python does not translate. Direct already-English visual input may omit the flag; an unprepared non-Latin request fails with `VISUAL_QUERY_REQUIRED`, not a silent English fallback. `semantic_query` owns one fixed recipe, `english-visual-intent-v1`, shared by both semantic entry points: encode the NFC-normalized English visual phrase directly, with no prefix, caption template or ensemble. The frozen recipe has `prompts: [visual_query]` and `weights: [1.0]`. It exposes no selectable strategy versions or arbitrary caller prompts/weights. The recipe's actual encoded text is traceable; this is not itself evidence of improved retrieval quality.
 
-This query-side policy is separate from image profile identity: the profile, pinned checkpoint, 768-dimensional vectors and schema 10 remain unchanged, and no image reindexing is required. `query_encoding` freezes `strategy`, original `query`, English `visual_query`, actual `prompts` and `weights`. `show-results` and search-selected folder-add provenance preserve this recipe; reports show the user the actual encoded text. There is exactly one text encoder call per unique semantic condition with eligible vectors (`model_calls: 1` for plain search), otherwise zero. The prompt must satisfy the unchanged token limit; finalization and showing perform no additional encoding.
+This query-side policy is separate from image profile identity: the profile, pinned checkpoint, 768-dimensional vectors and current schema 11 remain unchanged, and no image reindexing is required. `query_encoding` freezes `strategy`, original `query`, English `visual_query`, actual `prompts` and `weights`. `show-results` and search-selected folder-add provenance preserve this recipe; reports show the user the actual encoded text. There is exactly one text encoder call per unique semantic condition with eligible vectors (`model_calls: 1` for plain search), otherwise zero. The prompt must satisfy the unchanged token limit; finalization and showing perform no additional encoding.
 
 ### Machine-local setup
 
@@ -267,7 +278,7 @@ Detailed recipes, supported command flags and safety gates: [index reference](..
 
 ### Unified content search
 
-Default `management search` uses `unified-search-query-v1` and a private `unified-search-snapshot-v1`, without changing schema 10 or requiring new image vectors. It combines requested AND/OR conditions and optional supporting evidence, then sends compact numbered review data rather than full per-photo coverage, source hashes or paths. The global deduplicated candidate default is 100; any positive requested count or `all` is accepted, with no count ceiling or byte-budget truncation. Review totals describe a bounded retrieval when a finite limit excludes candidates, not exhaustive relevance.
+Default `management search` uses `unified-search-query-v1` and a private `unified-search-snapshot-v1`, without changing current schema 11 or requiring new image vectors. It combines requested AND/OR conditions and optional supporting evidence, then sends compact numbered review data rather than full per-photo coverage, source hashes or paths. The global deduplicated candidate default is 100; any positive requested count or `all` is accepted, with no count ceiling or byte-budget truncation. Review totals describe a bounded retrieval when a finite limit excludes candidates, not exhaustive relevance. These local search decisions are not the optional cloud `review` capability and never authorize photo transmission.
 
 The AI returns a number array bound to the saved `review_id`. Selection preserves frozen local order and revalidates sources; it never turns holistic selection into fabricated per-semantic Boolean matches. Complete source identities and number mappings stay in the local snapshot. `show-results` saves a separate selected snapshot and returns a compact summary; optional HTML is user-only. Folder additions with `--review-snapshot` and `--review-id` accept only previously selected numbers. Detailed query fields, unknown semantics and compatibility rules are defined in the bundled [search reference](../photography/references/search.md).
 
@@ -291,7 +302,7 @@ Export protections cover the database, transaction/execution-lock sidecars, loca
 
 ### Legacy stage-two condition snapshots and ranking
 
-The separate `management query --query-file <query.json> --output <private-snapshot.json>`, `query-evidence`, `finalize-query`, `show-query-results` and `query-pairs` workflow adds no tables or migrations: schema 10 and all 37 registered tables remain unchanged. `condition_queries` validates/deduplicates strict `multi-condition-query-v1` OR predicates and freezes profile IDs, scope and aliases; `feature_predicates` reads current saved typed results through storage helpers; `condition_search` captures candidate/source identities and validates explicit review pages; `condition_ranking` ranks detached data without storage/models. CLI/export/report helpers do not implement predicates.
+The separate `management query --query-file <query.json> --output <private-snapshot.json>`, `query-evidence`, `finalize-query`, `show-query-results` and `query-pairs` workflow adds no tables or migrations: current schema 11 and all 40 registered tables remain unchanged. `condition_queries` validates/deduplicates strict `multi-condition-query-v1` OR predicates and freezes profile IDs, scope and aliases; `feature_predicates` reads current saved typed results through storage helpers; `condition_search` captures candidate/source identities and validates explicit review pages; `condition_ranking` ranks detached data without storage/models. CLI/export/report helpers do not implement predicates.
 
 Supported kinds are semantic, object_count, ocr_contains, color_fraction, subject_position, scene and has_near_duplicate. Discover actual profiles/taxonomies with `index profiles --component <component>`. Defaults resolve once; no automatic configure/index/image inference/downloads. OCR uses normalized literal `INSTR` for 1–2 characters and trigram candidates plus literal confirmation for 3+, not query-language interpolation. Counts require complete saved detections and a threshold no lower than the saved floor; incomplete/missing subject evidence is unknown. Scene/color/thirds rules are explicit. Duplicate lookup uses saved exact SHA-256 or same-profile dHash64 Hamming, not pHash, and does not persist comparison jobs or create dense N×N matrices.
 
@@ -313,9 +324,23 @@ Full JSON/CLI definitions: [condition query reference](../photography/references
 
 Use a single writer on one device. Cloud workflow is **download a complete local file → operate locally → stop/close all work → copy/sync**. Do not open HTTP/S3 URLs or assume network filesystem/concurrent-copy safety. Do not copy a live bare SQLite file or delete its journal/lock sidecars. Each host separately needs compatible dependencies and model files.
 
-`management backup --output <new-file>` uses SQLite's consistent backup API without replacing an existing target. It includes metadata, previews, profiles, vectors, feature evidence/dependencies, prototypes, runs, OCR FTS and folder memberships; excludes external originals, model weights and Python environments. It preserves album UUID and paths. After relocation, originals need a working absolute address or preserved relative layout, otherwise explicit relink. Backups are not independently writable branches with auto-merge.
+`management backup --output <new-file>` uses SQLite's consistent backup API without replacing an existing target. It includes metadata, previews, profiles, vectors, feature evidence/dependencies, prototypes, runs, OCR FTS, review results/runs/batches and folder memberships; excludes external originals, model weights, credentials and Python environments. It preserves album UUID and paths. After relocation, originals need a working absolute address or preserved relative layout, otherwise explicit relink. Backups are not independently writable branches with auto-merge.
 
 Dependency installation, model setup, real-photo trials and exact-plan inference are separate authorizations. Creating/opening an album or accepting an index invitation does not grant all of them. Ordinary index/search never downloads missing files or falls back to cloud analysis. The user's existing old database/backups are not trial targets.
+
+### Optional Copilot review boundary
+
+The [bundled review contract](../photography/references/review.md) defines `review rubric/models/plan/execute/job/resume/result/history/report` under global `--database`. `review models --confirm-provider-access` is separately approved provider contact; omission returns `CONFIRMATION_REQUIRED` before SDK construction. Help/planning/read commands never construct the SDK or probe authentication/models. Exact whole-task approval precedes any SDK construction/auth/model check/session/upload; every retry/resume requires fresh state-bound approval from `review job`, with additional all-workers-stopped confirmation for a saved running attempt. Old/consumed digests are not reusable consent.
+
+The self-contained Skill bundles `prompts\photo-review-v1.txt` and optional `requirements-review.txt` (`github-copilot-sdk==1.0.13`, runtime 1.0.83). Installation/runtime download is explicit, never a first-use side effect. Authentication defaults to existing local Copilot credentials with `mode="copilot-cli"` / `use_logged_in_user=True`, no separate token required, no auto-login or silent account fallback. Child-only overrides are excluded; safe owned working/session state must not relocate the credential home. Restricted no-tool sessions, deletion/abort/shutdown and owned-state cleanup are not OS sandboxing, no-logs, zero-retention or exact-charge guarantees.
+
+Planning selects existing photo IDs with exactly `--photo-id` or absolute `--ids-file`, explicit model and optional positive batch size (default 4), language (`zh-CN` default or `en`), `--force`, `--dry-run`. It validates stored JPEG previews only and freezes actual input sizes/identities, cloud disclosure, config/prompt/schema/model/language, cached references and batches. No original bytes/paths, filenames, EXIF or album identity are sent; opaque image labels map locally. A smaller tail is allowed, with independent evaluations and no batch ranking. Unknown/incompatible provider limits fail rather than silently resize/repack/substitute.
+
+Success is strict `photo-review-v1` JSON: `description`, `strengths`, `improvements`, `limitations` and exactly `composition`, `lighting`, `color`, `subject`, `storytelling`, `technical` scores, each numeric 0–10 with a reason. The equal-weight mean is locally computed with decimal half-up rounding to two decimal places, never supplied by the model. Invalid response text is not persisted or returned as a successful review. Model output is untrusted; preview technical judgments are not original-file quality measurements.
+
+Reuse keys bind saved content/preview identity and output-affecting config, not paths or batch companions. Force appends immutable history. Network calls stay outside SQL transactions; revalidate identities before transmission and atomic whole-batch commit. Failure preserves earlier successes and stops subsequent batches; no automatic retries/repair calls/fallback. All-cached/completed work sends nothing; uncertain attempts carry duplicate-charge risk. Current/stale result/history reads use saved identities, without originals or AI. This does not change existing local ingestion/index/search behavior.
+
+`review report <run-id> --output <absolute-new.html>` is a read-only album operation exporting a no-overwrite, self-contained HTML snapshot from saved results and matching previews. It makes no SDK/original calls, database writes or external network requests. Escaped text and embedded previews support local user display without scripts/write controls. Persisted active timings exclude confirmation waits/report generation, not necessarily provider overhead. Show only actual provider-reported token/credit fields with source/units; missing usage is unknown, not zero. Copilot credits are not Azure credits or an inferred price. Shared batch usage is not per-photo usage and is never multiplied by photo count. Retry approvals preserve previous failed-attempt metadata; aggregate distinct known attempts, labeling incomplete coverage. The completed authorized trial used 4+4+2 at the user's request; `--batch-size 1` remains an option for individual request metrics. Product default remains 4 and explicit frozen-plan approval is still required before provider contact.
 
 ## 10. Pending validation and stage two
 
@@ -340,6 +365,7 @@ Future separately authorized evaluation should verify download reuse/recovery an
 
 Mandatory follow-ups in [TODO](TODO.md):
 
+- **Live Copilot review:** not run. The requested random 10-photo trial from the user-provided folder uses explicit batch size 1 for individual request timing/available usage; its frozen plan still needs approval before any provider contact. Verify persisted results and local HTML without invented usage or Azure credits. Four-image synthetic delivery remains a separate acceptance check; single-photo requests and mocks do not prove it or live retention/charges.
 - **NaFlex:** new profile/input budget and quality/resource comparison, never in-place vector replacement.
 - **Stage 2 OR search:** implemented as above; targeted integration checks have passed. OCR/field queries and combined ranking reuse persisted stage-one evidence; metadata/semantic modes and defaults remain unchanged. Real-photo quality and larger deployment-scale performance require separate evaluation.
 - **Technical parameters:** focus/exposure analysis remains future index work with independent versioned inputs/results and authorization. No empty `technical_*` tables or fake results; preview blur is not original focus quality, and missing data means unknown.

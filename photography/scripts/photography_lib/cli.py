@@ -1,4 +1,4 @@
-"""Three capabilities operating on an explicitly selected SQLite album file."""
+"""Four independent capabilities on an explicitly selected SQLite album file."""
 import argparse
 import json
 from pathlib import Path
@@ -10,7 +10,7 @@ from .sqlite_storage import SQLiteStorage
 
 
 def parser():
-    root = argparse.ArgumentParser(description="Smart Albums: one SQLite file per album. Select or create an album before ingestion, image indexing or management.")
+    root = argparse.ArgumentParser(description="Smart Albums: one SQLite file per album. Select or create an album before ingestion, indexing, management or AI review.")
     root.add_argument("--database", required=True, help="Absolute .sqlite/.sqlite3/.db album file; never chosen implicitly.")
     root.add_argument("--model-cache-dir", help="Independent machine-local model cache root.")
     commands = root.add_subparsers(dest="command", required=True)
@@ -20,8 +20,10 @@ def parser():
     scan.add_argument("--thumbnail-quality", type=int, default=85)
     from .index_cli import add_commands as add_index
     from .management_cli import add_commands as add_management
+    from .review_cli import add_commands as add_review
     add_index(commands)
     add_management(commands)
+    add_review(commands)
     return root
 
 
@@ -45,11 +47,16 @@ def main(argv=None):
                 from .management_cli import FOLDER_WRITES
 
                 writable = args.folder_command in FOLDER_WRITES
+            if args.command == "review":
+                writable = args.review_command in ("execute", "resume") or (
+                    args.review_command == "plan" and not args.dry_run)
             context = SQLiteStorage.create(config.database_path) if create else \
                 SQLiteStorage.open(config.database_path, writable=writable)
             with context as store:
                 if args.command == "index":
                     from .index_cli import command
+                elif args.command == "review":
+                    from .review_cli import command
                 else:
                     from .management_cli import command
                 result = command(args, store, config)

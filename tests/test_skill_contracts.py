@@ -25,6 +25,10 @@ from photography_lib.image_feature_storage import (
     FEATURE_ALL_TABLES, FEATURE_FTS_SHADOW_TABLES, FEATURE_FTS_TABLE,
     IMAGE_FEATURE_SCHEMA, IMAGE_FEATURE_TABLES,
 )
+from photography_lib.review_schema import (
+    DIMENSIONS, RUNTIME_VERSION, SDK_VERSION, SCHEMA_VERSION as REVIEW_SCHEMA_VERSION, parse_response,
+)
+from photography_lib.review_storage import REVIEW_SCHEMA, REVIEW_TABLES
 from photography_lib.sqlite_storage import SCHEMA, SCHEMA_VERSION
 from photography_lib.virtual_folder_storage import VIRTUAL_FOLDER_SCHEMA
 
@@ -37,10 +41,15 @@ QUERY_GUIDES = (
     ROOT / "docs" / "index-design.md",
 )
 UNIFIED_GUIDES = QUERY_GUIDES[:-1]
+REVIEW_GUIDES = (
+    ROOT / "README.md",
+    ROOT / "photography" / "SKILL.md",
+    ROOT / "photography" / "references" / "review.md",
+)
 
 
 class SkillContractTests(unittest.TestCase):
-    def test_skill_exposes_three_named_capabilities(self):
+    def test_skill_exposes_four_named_capabilities(self):
         text = (ROOT / "photography" / "SKILL.md").read_text(encoding="utf-8")
         self.assertTrue(text.startswith("---\n"))
         self.assertIn("name: smart-albums", text.split("---", 2)[1])
@@ -48,9 +57,10 @@ class SkillContractTests(unittest.TestCase):
         names = []
         for row in rows:
             first = row.split("|")[1].strip().strip("`*").lower()
-            if first in ("ingestion", "index", "management"):
+            if first in ("ingestion", "index", "management", "review"):
                 names.append(first)
-        self.assertCountEqual(names, ["ingestion", "index", "management"])
+        self.assertCountEqual(names, ["ingestion", "index", "management", "review"])
+        self.assertIn("exactly four photography capabilities", text.split("---", 2)[1])
         self.assertNotIn("requirements-embedding.txt", text)
         self.assertNotIn("multilingual-e5", text.lower())
 
@@ -73,7 +83,7 @@ class SkillContractTests(unittest.TestCase):
                               "Python does not translate", "VISUAL_QUERY_REQUIRED", "QUERY_TOO_LONG",
                               "64", "EOS", "without truncation", "one fixed recipe",
                               semantic_query.STRATEGY, "no image reindexing is required",
-                              "768", "schema 10"):
+                              "768", "schema 11"):
                     self.assertIn(token, text)
                 self.assertIn("Never translate literal metadata or OCR searches", text)
                 self.assertIn("`--visual-query` is rejected in metadata mode", text)
@@ -433,6 +443,10 @@ class SkillContractTests(unittest.TestCase):
             workspace.mkdir()
             self.assertFalse((installed.parent / "docs").exists())
             self.assertFalse((installed.parent / ".venv-features").exists())
+            self.assertFalse((installed.parent / ".venv-review").exists())
+            self.assertTrue((installed / "prompts" / "photo-review-v1.txt").is_file())
+            self.assertEqual((installed / "requirements-review.txt").read_text(encoding="utf-8"),
+                             (ROOT / "photography" / "requirements-review.txt").read_text(encoding="utf-8"))
             self.assert_local_markdown_links(sorted(installed.rglob("*.md")), bundle=installed.resolve())
             runtime_reference = (installed / "references" / "index.md").read_text(encoding="utf-8")
             self.assertIn("absolute path via `--worker-python`", runtime_reference)
@@ -449,6 +463,7 @@ class NoModelImports:
     def find_spec(self, fullname, path=None, target=None):
         if fullname.split(".", 1)[0] in {
             "torch", "transformers", "rapidocr", "onnxruntime", "cv2", "numpy", "huggingface_hub",
+            "copilot", "copilot_sdk_runtime",
         }:
             raise AssertionError("Installed help must not import optional models: " + fullname)
 
@@ -457,6 +472,9 @@ entrypoint = Path(sys.argv[1])
 sys.path.insert(0, str(entrypoint.parent))
 from photography_lib.cli import parser
 from photography_lib.feature_models import worker_python
+from photography_lib.review_schema import PROMPT_PATH, review_profile
+assert PROMPT_PATH == entrypoint.parent.parent / "prompts" / "photo-review-v1.txt"
+assert review_profile("explicit-test-vision-model")["prompt_text"] == PROMPT_PATH.read_text(encoding="utf-8")
 arguments = parser().parse_args([
     "--database", str(Path.cwd() / "unopened.sqlite"), "index", "setup", "--component", "ocr",
     "--worker-python", sys.executable,
@@ -467,7 +485,10 @@ runpy.run_path(str(entrypoint), run_name="__main__")
 """
             for command in ([], ["ingestion"], ["index"], ["management"], ["management", "search"],
                             ["management", "search-evidence"], ["management", "show-results"],
-                            ["management", "folders", "add"]):
+                            ["management", "folders", "add"], ["review"], ["review", "rubric"],
+                            ["review", "models"], ["review", "plan"], ["review", "execute"],
+                            ["review", "resume"], ["review", "job"], ["review", "result"],
+                            ["review", "history"], ["review", "report"]):
                 with self.subTest(command=command):
                     result = subprocess.run(
                         [sys.executable, "-I", "-B", "-c", probe, str(entrypoint), *command, "--help"],
@@ -528,16 +549,21 @@ runpy.run_path(str(entrypoint), run_name="__main__")
                        "do not read its HTML image payloads"):
             self.assertIn(phrase, section)
 
-    def test_current_guides_describe_actual_schema_ten_without_migration(self):
+    def test_current_guides_describe_actual_schema_eleven_without_migration(self):
         with closing(sqlite3.connect(":memory:")) as database:
-            for statement in (*SCHEMA, *IMAGE_EMBEDDING_SCHEMA, *VIRTUAL_FOLDER_SCHEMA, *IMAGE_FEATURE_SCHEMA):
+            for statement in (*SCHEMA, *IMAGE_EMBEDDING_SCHEMA, *VIRTUAL_FOLDER_SCHEMA,
+                              *IMAGE_FEATURE_SCHEMA, *REVIEW_SCHEMA):
                 database.execute(statement)
             tables = {row[0] for row in database.execute(
                 "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-        self.assertEqual(SCHEMA_VERSION, 10)
+        self.assertEqual(SCHEMA_VERSION, 11)
         self.assertEqual(len(IMAGE_EMBEDDING_TABLES), 6)
-        self.assertEqual(len(tables), 13 + len(FEATURE_ALL_TABLES))
+        self.assertEqual(set(REVIEW_TABLES), {"ai_review_results", "ai_review_runs", "ai_review_batches"})
+        self.assertEqual(len(tables), 13 + len(FEATURE_ALL_TABLES) + len(REVIEW_TABLES))
+        self.assertEqual(len(tables), 40)
         ordinary_count = len(tables) - 1 - len(FEATURE_FTS_SHADOW_TABLES)
+        self.assertEqual(ordinary_count, 35)
+        self.assertEqual(len(FEATURE_FTS_SHADOW_TABLES), 4)
         documents = [ROOT / "README.md", ROOT / "photography" / "SKILL.md",
                      ROOT / "docs" / "index-design.md", ROOT / "docs" / "TODO.md"]
         documents += list((ROOT / "photography" / "references").glob("*.md"))
@@ -546,7 +572,7 @@ runpy.run_path(str(entrypoint), run_name="__main__")
             with self.subTest(document=document.name):
                 self.assertIn(f"schema {SCHEMA_VERSION}", text.lower())
                 self.assertRegex(text, rf"{len(tables)} (?:registered tables|张注册表)")
-                self.assertIn("v1–v9", text)
+                self.assertIn("v1–v10", text)
                 self.assertRegex(text, r"rejected unchanged|原样拒绝")
                 self.assertRegex(text, r"no (?:automatic )?migration|not migrated|not reinitialized or migrated|不迁移")
                 self.assertIn("virtual_folders", text)
@@ -563,6 +589,7 @@ runpy.run_path(str(entrypoint), run_name="__main__")
         self.assertIn("content_rowid='document_id'", design)
         self.assertIn("tokenize='trigram'", design)
         self.assertTrue(set(IMAGE_FEATURE_TABLES) <= tables)
+        self.assertTrue(set(REVIEW_TABLES) <= tables)
         self.assertTrue({FEATURE_FTS_TABLE, *FEATURE_FTS_SHADOW_TABLES} <= documented_tables)
         for columns in (
                 "virtual_folders(folder_id, name, name_key, description, created_at, updated_at)",
@@ -570,6 +597,174 @@ runpy.run_path(str(entrypoint), run_name="__main__")
             self.assertIn(columns, design)
         self.assertIn("primary key `(folder_id, photo_id)`", design)
         self.assertIn("reverse index `(photo_id, folder_id)`", design)
+
+    def test_review_guides_require_whole_task_and_fresh_retry_approval(self):
+        for document in REVIEW_GUIDES:
+            text = document.read_text(encoding="utf-8").casefold()
+            with self.subTest(document=document.name):
+                for token in (
+                        "whole", "task", "before sdk construction", "authentication/model",
+                        "contact", "cloud-transfer", "--confirm-provider-access",
+                        "confirmation_required", "model-list approval", "does not approve",
+                        "help/planning/read commands never construct the sdk",
+                        "fresh state-bound approval", "retry", "consumed", "digest",
+                        "--confirm-stopped", "no automatic retry", "fallback",
+                        "batch", "4", "independently", "atomically", "--force", "history",
+                        "authorized live copilot validation completed",
+                        "trial requires explicit approval of its frozen plan before provider contact"):
+                    self.assertIn(token, text)
+        skill = (ROOT / "photography" / "SKILL.md").read_text(encoding="utf-8")
+        section = skill.split("## review\n", 1)[1].split("## Format and unverified work", 1)[0]
+        for token in ("code-plan approval", "earlier tasks", "in the user's language",
+                      "never authorizes cloud image transfer", "Never copy credentials",
+                      "actual dimensions/bytes", "No automatic retry or fallback"):
+            self.assertIn(token, section)
+
+    def test_review_guides_keep_runtime_optional_and_authentication_scoped(self):
+        for document in REVIEW_GUIDES:
+            text = document.read_text(encoding="utf-8")
+            with self.subTest(document=document.name):
+                for token in ("requirements-review.txt", f"github-copilot-sdk=={SDK_VERSION}",
+                              RUNTIME_VERSION, 'mode="copilot-cli"', "use_logged_in_user=True",
+                              "credential home", "owned working/session state", "Child-only",
+                              "no-logs", "OS sandbox", "runtime download"):
+                    self.assertIn(token, text)
+                self.assertRegex(text.casefold(), r"no separate token (?:is )?required|no separate token required")
+                self.assertIn("existing local Copilot", text)
+        dependencies = (ROOT / "photography" / "requirements-review.txt").read_text(encoding="utf-8")
+        reference = (ROOT / "photography" / "references" / "review.md").read_text(encoding="utf-8")
+        self.assertIn(
+            rf"<absolute-project-environment>\Scripts\python.exe -m copilot download-runtime --version {RUNTIME_VERSION}",
+            reference,
+        )
+        self.assertIn("runtime.node", reference)
+        self.assertIn(".hostless-runtime-assets-v2", reference)
+        self.assertIn("COPILOT_CLI_EXTRACT_DIR", reference)
+        self.assertIn("entire version-specific cache root", reference)
+        self.assertIn("an existing `COPILOT_HOME` override", reference)
+        self.assertIn('authType="user"', reference)
+        self.assertIn("https://github.com", reference)
+        self.assertIn("first use, this adapter must fail instead", reference)
+        self.assertEqual(
+            [line.strip() for line in dependencies.splitlines() if line.strip() and not line.lstrip().startswith("#")],
+            [f"github-copilot-sdk=={SDK_VERSION}"],
+        )
+        for filename in ("requirements.txt", "requirements-index.txt", "requirements-features.txt"):
+            text = (ROOT / "photography" / filename).read_text(encoding="utf-8").casefold()
+            self.assertNotIn("github-copilot-sdk", text)
+
+    def test_review_guides_document_versioned_queryable_results_not_search(self):
+        self.assertEqual(DIMENSIONS, ("composition", "lighting", "color", "subject", "storytelling", "technical"))
+        for document in REVIEW_GUIDES:
+            text = document.read_text(encoding="utf-8")
+            with self.subTest(document=document.name):
+                for token in (REVIEW_SCHEMA_VERSION, *DIMENSIONS, "description", "strengths",
+                              "improvements", "limitations", "reason", "equal-weight mean",
+                              "two decimal places", "decimal half-up", "strict", "JPEG",
+                              "no review-aware search entry in v1", "fixed", "JSON", "FTS",
+                              "ai_review_results", "ai_review_runs", "ai_review_batches",
+                              "local ingestion/index/search behavior is unchanged"):
+                    self.assertIn(token, text)
+        reference = (ROOT / "photography" / "references" / "review.md").read_text(encoding="utf-8")
+        for token in ("$.scores.composition.reason", "$.strengths[0]", "$.improvements[0]",
+                      "$.limitations[0]", "payload_json", "description", "overall_score",
+                      "duplicate JSON keys", "booleans", "NaN/infinity", "unknown/duplicate/missing image IDs",
+                      "4,000", "1 MiB", "1–8", "not original-file measurements",
+                      "not persisted", "never raw assistant text"):
+            self.assertIn(token, reference)
+        for dimension in DIMENSIONS:
+            self.assertIn(f"{dimension}_score", reference)
+
+    def test_documented_review_response_validates_against_shared_contract(self):
+        text = (ROOT / "photography" / "references" / "review.md").read_text(encoding="utf-8")
+        examples = re.findall(r"```json\n(.*?)```", text, re.DOTALL)
+        self.assertTrue(examples)
+        for example in examples:
+            with self.subTest(example=example):
+                response = json.loads(example)
+                self.assertEqual(response["schema_version"], REVIEW_SCHEMA_VERSION)
+                self.assertEqual([item["image_id"] for item in response["reviews"]], ["image_1"])
+                parsed = parse_response(example, ["image_1"])
+                self.assertEqual(parsed["image_1"]["overall_score"], 6.17)
+                self.assertNotIn("image_id", parsed["image_1"])
+
+    def test_documented_review_commands_parse_without_execution(self):
+        cli = parser()
+        values = {"absolute-json-file": str(ROOT / "contract-only-photo-ids.json"),
+                  "absolute-new.html": str(ROOT / "contract-only-new.html"),
+                  "photo-id": "photo-id", "model-id": "explicit-vision-model"}
+        actions = {"rubric", "models", "plan", "execute", "job", "resume", "result", "history", "report"}
+        for document in REVIEW_GUIDES:
+            text = document.read_text(encoding="utf-8")
+            commands = [line for block in re.findall(r"```text\n(.*?)```", text, re.DOTALL)
+                        for line in block.splitlines() if line.startswith("review ")]
+            self.assertEqual({command.split()[1] for command in commands}, actions, document.name)
+            for command in commands:
+                for optional in (False, True):
+                    expanded = re.sub(r"\[([^\[\]]*)\]", r"\1" if optional else "", command)
+                    expanded = re.sub(r"<([^>]+)>", lambda item: values.get(item[1], item[1]), expanded)
+                    expanded = re.sub(r"\bN\b", "20", expanded).replace("zh-CN|en", "en")
+                    arguments = shlex.split(expanded, posix=False)
+                    with self.subTest(document=document.name, command=expanded):
+                        parsed = cli.parse_args(["--database", str(ROOT / "contract-only.sqlite"), *arguments])
+                        self.assertEqual(parsed.command, "review")
+                        self.assertEqual(parsed.review_command, command.split()[1])
+                        if parsed.review_command == "plan":
+                            self.assertEqual(parsed.model, "explicit-vision-model")
+                            self.assertEqual(parsed.batch_size, 4)
+                            self.assertNotEqual(bool(parsed.photo_id), bool(parsed.ids_file))
+                            if parsed.ids_file:
+                                self.assertTrue(Path(parsed.ids_file).is_absolute())
+                                self.assertEqual(parsed.language, "en" if optional else "zh-CN")
+                                self.assertEqual(parsed.force, optional)
+                                self.assertEqual(parsed.dry_run, optional)
+                        if parsed.review_command == "models":
+                            self.assertTrue(parsed.confirm_provider_access)
+                        if parsed.review_command == "resume":
+                            self.assertEqual(parsed.confirm, "retry-digest")
+                            self.assertEqual(parsed.confirm_stopped, optional)
+                        if parsed.review_command == "report":
+                            self.assertEqual(parsed.run_id, "run-id")
+                            self.assertEqual(Path(parsed.output), ROOT / "contract-only-new.html")
+                            self.assertTrue(Path(parsed.output).is_absolute())
+
+    def test_review_report_guides_separate_local_exports_and_observed_usage(self):
+        for document in REVIEW_GUIDES:
+            text = document.read_text(encoding="utf-8").casefold()
+            with self.subTest(document=document.name):
+                for token in ("review report <run-id> --output <absolute-new.html>",
+                              "read-only album operation", "no-overwrite", "self-contained html",
+                              "no external network", "active execution time excludes user confirmation waits",
+                              "report generation", "provider-reported", "missing usage is not zero",
+                              "unknown", "copilot credits are not azure credits", "per-photo",
+                              "--batch-size 1", "default remains 4", "random 10-photo",
+                              "user-provided source folder", "frozen plan", "retry"):
+                    self.assertIn(token, text)
+        skill = (ROOT / "photography" / "SKILL.md").read_text(encoding="utf-8")
+        self.assertIn("do not use an agent browser/screenshot tool to inspect its image payloads", skill)
+        reference = (ROOT / "photography" / "references" / "review.md").read_text(encoding="utf-8")
+        for token in ("existing destination is an error", "Not reported", "incomplete", "source and unit",
+                      "not pure model inference latency", "no scripts or write controls",
+                      "single-photo trial does not validate four-image delivery",
+                      "authorized 10-photo trial completed with batches 4+4+2", "assistant.usage:per_call_sum",
+                      "assistant.usage:unavailable", "explicitly reported zero is preserved",
+                      "Duplicate event UUIDs count once", "subset of output tokens",
+                      "session.usage_info", "not token consumption", "assistant.usage.cost",
+                      "premium multiplier, not credits/currency", "copilot_usage.total_nano_aiu",
+                      'credits_unit="copilot_nano_aiu"'):
+            self.assertIn(token, reference)
+
+    def test_documented_models_confirmation_fails_before_provider_construction(self):
+        from photography_lib.config import PhotographyError
+        from photography_lib.review_cli import command
+
+        args = parser().parse_args(["--database", str(ROOT / "contract-only.sqlite"), "review", "models"])
+        self.assertFalse(args.confirm_provider_access)
+        with patch("photography_lib.review._provider", side_effect=AssertionError("Unapproved provider")) as provider:
+            with self.assertRaises(PhotographyError) as raised:
+                command(args, Mock(), Mock())
+            self.assertEqual(raised.exception.code, "CONFIRMATION_REQUIRED")
+            provider.assert_not_called()
 
     def test_manual_custom_folders_are_primary_and_support_one_photo_without_index(self):
         text = (ROOT / "photography" / "SKILL.md").read_text(encoding="utf-8")
@@ -589,7 +784,7 @@ runpy.run_path(str(entrypoint), run_name="__main__")
                         text.index("### Optional one-time organization"))
         self.assertIn("static, flat many-to-many collections inside one SQLite album", text)
         self.assertIn("folder selections and pending confirmations", text)
-        self.assertIn("not a fourth capability", text)
+        self.assertIn("explicit management writes, not additional capabilities", text)
 
     def test_skill_and_management_reference_include_complete_folder_commands(self):
         commands = (

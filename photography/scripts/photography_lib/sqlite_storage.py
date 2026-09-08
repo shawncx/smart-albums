@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import stat
 from collections import deque
@@ -17,6 +18,7 @@ from .image_feature_storage import (
     FEATURE_ALL_TABLES, IMAGE_FEATURE_SCHEMA, ImageFeatureStorage, feature_schema_registry,
 )
 from .thumbnails import validate_preview
+from .review_storage import REVIEW_SCHEMA, REVIEW_TABLES, ReviewStorage, review_schema_registry
 from .virtual_folder_storage import VIRTUAL_FOLDER_SCHEMA, VIRTUAL_FOLDER_TABLES, VirtualFolderStorage
 
 
@@ -25,7 +27,7 @@ def now() -> str:
 
 
 APPLICATION_ID = 0x53414C42
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 SCHEMA = (
     """CREATE TABLE album_metadata (
@@ -100,6 +102,7 @@ REQUIRED_COLUMNS = {
     "virtual_folder_photos": {"folder_id", "photo_id", "added_at"},
 }
 REQUIRED_COLUMNS.update(feature_schema_registry()[1])
+REQUIRED_COLUMNS.update(review_schema_registry()[1])
 
 PHOTO_REQUIRED_FIELDS = (
     "photo_id", "original_absolute_path", "content_version", "thumbnail_profile",
@@ -150,7 +153,7 @@ def _publish_new(temporary: Path, destination: Path) -> None:
         raise PhotographyError("DATABASE_EXISTS", f"Destination appeared during creation and was not overwritten: {destination}") from exc
 
 
-class SQLiteStorage(ImageEmbeddingStorage, ImageFeatureStorage, VirtualFolderStorage):
+class SQLiteStorage(ImageEmbeddingStorage, ImageFeatureStorage, VirtualFolderStorage, ReviewStorage):
     def __init__(self, *args, **kwargs):
         raise PhotographyError("STORAGE_OPEN_REQUIRED", "Use SQLiteStorage.create(path) or SQLiteStorage.open(path).")
 
@@ -184,7 +187,8 @@ class SQLiteStorage(ImageEmbeddingStorage, ImageFeatureStorage, VirtualFolderSto
             with store.transaction():
                 store.db.execute(f"PRAGMA application_id={APPLICATION_ID}")
                 store.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
-                for statement in (*SCHEMA, *IMAGE_EMBEDDING_SCHEMA, *VIRTUAL_FOLDER_SCHEMA, *IMAGE_FEATURE_SCHEMA):
+                for statement in (*SCHEMA, *IMAGE_EMBEDDING_SCHEMA, *VIRTUAL_FOLDER_SCHEMA, *IMAGE_FEATURE_SCHEMA,
+                                  *REVIEW_SCHEMA):
                     store.db.execute(statement)
                 store.db.execute("INSERT INTO album_metadata VALUES (1,?,?)", (str(uuid4()), now()))
                 store._validate_format()
@@ -245,7 +249,7 @@ class SQLiteStorage(ImageEmbeddingStorage, ImageFeatureStorage, VirtualFolderSto
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*'")}
         expected = {
             "album_metadata", "photos", "thumbnails", "scans", "scan_events",
-            *IMAGE_EMBEDDING_TABLES, *VIRTUAL_FOLDER_TABLES, *FEATURE_ALL_TABLES,
+            *IMAGE_EMBEDDING_TABLES, *VIRTUAL_FOLDER_TABLES, *FEATURE_ALL_TABLES, *REVIEW_TABLES,
         }
         if tables != expected:
             raise PhotographyError("SCHEMA_INVALID",
@@ -256,6 +260,7 @@ class SQLiteStorage(ImageEmbeddingStorage, ImageFeatureStorage, VirtualFolderSto
             if missing:
                 raise PhotographyError("SCHEMA_INVALID", f"Album table {table} is missing required columns: {sorted(missing)}.")
         self.validate_feature_schema()
+        self.validate_review_schema()
         records = self.db.execute("SELECT singleton,album_uuid,created_at FROM album_metadata").fetchall()
         if len(records) != 1 or records[0]["singleton"] != 1:
             raise PhotographyError("SCHEMA_INVALID", "Album metadata must contain exactly one singleton record.")
@@ -268,6 +273,23 @@ class SQLiteStorage(ImageEmbeddingStorage, ImageFeatureStorage, VirtualFolderSto
             raise PhotographyError("DATABASE_INVALID", "Album file failed SQLite integrity validation.")
         if self.db.execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise PhotographyError("SCHEMA_INVALID", "Album file contains invalid foreign-key references.")
+
+    def validate_feature_schema(self) -> None:
+        # Cross-capability trigger registration belongs to the complete album
+        # format, rather than the feature mixin's earlier feature-only registry.
+        expected = self._validate_registered_schema(FEATURE_ALL_TABLES, feature_schema_registry())
+        triggers = {name: sql for (kind, name), sql in
+                    (*expected.items(), *review_schema_registry()[0].items()) if kind == "trigger"}
+        for statement in IMAGE_EMBEDDING_SCHEMA:
+            match = re.match(r"CREATE TRIGGER IF NOT EXISTS (\w+)", statement)
+            if match:
+                triggers[match[1]] = statement.replace("CREATE TRIGGER IF NOT EXISTS", "CREATE TRIGGER", 1)
+        actual = {row["name"]: row["sql"] for row in self.db.execute(
+            "SELECT name,sql FROM sqlite_master WHERE type='trigger'")}
+        normalize = lambda sql: re.sub(r"\s+", " ", sql.strip())
+        if set(actual) != set(triggers) or any(
+                normalize(actual[name]) != normalize(sql) for name, sql in triggers.items()):
+            raise PhotographyError("SCHEMA_INVALID", "Album contains missing, changed or unregistered triggers.")
 
     def close(self) -> None:
         if self.db is not None:

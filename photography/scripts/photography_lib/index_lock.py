@@ -6,7 +6,7 @@ from .config import PhotographyError
 
 
 @contextmanager
-def execution_lock(path):
+def execution_lock(path, *, error_prefix="INDEX", component="image-index"):
     handle = None
     locked = False
     try:
@@ -23,12 +23,13 @@ def execution_lock(path):
                 import fcntl
                 fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError as exc:
-            raise PhotographyError("INDEX_IN_PROGRESS",
-                "Another image-index executor owns this database. Wait for it to finish before resuming.") from exc
+            raise PhotographyError(error_prefix + "_IN_PROGRESS",
+                f"Another {component} executor owns this database. Wait for it to finish before resuming.") from exc
         locked = True
         yield
     except OSError as exc:
-        raise PhotographyError("INDEX_LOCK_UNAVAILABLE", f"Cannot use the image-index execution lock: {exc}") from exc
+        raise PhotographyError(error_prefix + "_LOCK_UNAVAILABLE",
+                               f"Cannot use the {component} execution lock: {exc}") from exc
     finally:
         if handle is not None:
             try:

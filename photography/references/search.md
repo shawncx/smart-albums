@@ -111,7 +111,7 @@ The host agent prepares English visual intent using **text only**, retaining the
 
 Python does not translate. Already-English visual input may omit `--visual-query`; an unprepared non-Latin request fails with `VISUAL_QUERY_REQUIRED`, never a silent fallback. All semantic entry points use one fixed recipe, `english-visual-intent-v1`: encode the NFC-normalized English visual phrase directly, with no prefix, caption template or ensemble. The frozen recipe has `prompts: [visual_query]` and `weights: [1.0]`, not selectable versions or arbitrary caller prompts/weights. There is exactly one text encoder call per unique semantic condition with eligible vectors (`model_calls: 1` for plain search); no candidates means zero calls. The prompt has a 64-token limit including EOS; `QUERY_TOO_LONG` rejects overflow without truncation or dropping constraints.
 
-Plain snapshots freeze `query_encoding`: `strategy`, original `query`, English `visual_query`, actual `prompts` and `weights`. Preserve it through `show-results` and search-selected folder-add provenance, and show the user the actual encoded text. Query-side preparation leaves the image profile, checkpoint, 768-dimensional vectors and schema 10 unchanged; no image reindexing is required. Recipe traceability is not a measured-quality claim.
+Plain snapshots freeze `query_encoding`: `strategy`, original `query`, English `visual_query`, actual `prompts` and `weights`. Preserve it through `show-results` and search-selected folder-add provenance, and show the user the actual encoded text. Query-side preparation leaves the image profile, checkpoint, 768-dimensional vectors and current schema 11 unchanged; no image reindexing is required. Recipe traceability is not a measured-quality claim.
 
 Legacy `--mode semantic` returns ranked top-K candidates, default 10 and range 1–1000, with photo-ID tie-breaking. It rejects `--after`. Numeric candidates include score/rank/gap information and stable input/result identities, but no filenames, photo metadata, image bytes or thumbnail payloads. Scores are cosine similarities, not probabilities, guaranteed matches, exact count/negation filters or focus/blur measurements. Report missing/stale/invalid coverage rather than implying all photos were searched.
 
@@ -222,7 +222,7 @@ The pool is the union of structured matches and semantic candidates within the s
 
 `coverage` is **input eligibility over the captured scope**, not final outcome: semantic `not_reviewed` means eligible at query time. `evaluated_coverage` is **final matched/not_matched/unknown over the candidate pool**. `retrieval` reports semantic limits, eligible counts and unretrieved count. Partial semantic coverage and missing indexes mean no-results cannot prove that no matching photos exist.
 
-Both `.json` and `.html` destinations are validated before source/current validation, preview reads or any write; query destinations are checked before model loading. Preserve query/candidate/decision inputs, including aliases/hardlinks. These commands are read-only against schema 10: no DDL, default/configuration changes, image inference, downloads, original checks or automatic folder writes.
+Both `.json` and `.html` destinations are validated before source/current validation, preview reads or any write; query destinations are checked before model loading. Preserve query/candidate/decision inputs, including aliases/hardlinks. These commands are read-only against schema 11: no DDL, default/configuration changes, image inference, downloads, original checks or automatic folder writes.
 
 HTML is **user-only**, standalone, escaped and protected by CSP without scripts, forms, selection widgets or backend. It embeds only matching saved previews for this page; never open/screenshot the report or send its image payloads to the agent. Conditions/OCR snippets are escaped untrusted text. Folder scope/names, counts and scores remain historical after folder changes; changed selected source identities still fail, while unavailable preview bytes display an error rather than replacement. Give the user the link.
 
@@ -240,7 +240,9 @@ JSON/HTML uses `album-snapshot-v2`, identifies the album UUID/path and preserves
 
 These JSON/HTML exports have no selection controls or membership writes; there is no live search server or retained `search-add` protocol. Old databases/reports are not migrated or converted into this format; do not restore the removed description-analysis runtime.
 
-Only schema 10 with 37 registered tables is supported: 32 ordinary, one external-content FTS5 virtual table and four explicitly registered shadows (excluding internal `sqlite_sequence`), including unchanged `virtual_folders` and `virtual_folder_photos`; v1–v9 databases are rejected unchanged with no migration.
+Only schema 11 with 40 registered tables is supported: 35 ordinary, one external-content FTS5 virtual table and four explicitly registered shadows (excluding internal `sqlite_sequence`), including unchanged `virtual_folders` and `virtual_folder_photos`; v1–v10 databases are rejected unchanged with no migration.
+
+The three `ai_review_*` tables support the separate optional [AI photography review](review.md) capability, not search. Local numbered search evidence review never authorizes Copilot contact or photo uploads; there is no review-aware search entry in v1 and no new review FTS.
 
 No real-model performance, retrieval quality, latency, memory or disconnected-runtime claim follows from synthetic tests or authorization alone.
 

@@ -1,7 +1,7 @@
 # Select or create a SQLite album file
 
 **One album corresponds to one SQLite file.** Selecting/creating that file is the
-entry to ingestion, index and management, not a fourth capability or a selection
+entry to ingestion, index, management and review, not another capability or a selection
 of a library followed by an internal album. The file-based interface is implemented.
 
 ## Entry workflow
@@ -14,7 +14,7 @@ of a library followed by an internal album. The file-based interface is implemen
    database from an example, current directory or environment default.
 3. **Create new:** require an explicit choice and an unused destination in an
    existing directory. Never overwrite/clear an existing file. Creation does not
-   authorize ingestion, downloads, path repair or inference.
+   authorize ingestion, downloads, path repair, inference or Copilot contact.
 4. Announce the full selected path and requested scope. Operate on that file
    directly; there is no internal album ID to choose.
 5. Switching files clears previous photo/profile/run/folder selections and pending
@@ -37,8 +37,8 @@ aliases and internal album/library options are removed, not compatibility entry 
 
 `create` initializes a private temporary file and publishes it without replacing
 an existing destination, including a file that appears during creation. Backups
-use the same no-overwrite publication boundary. The new album has schema 10,
-application ID `0x53414C42`, 37 registered tables and one album UUID: 32 ordinary,
+use the same no-overwrite publication boundary. The new album has schema 11,
+application ID `0x53414C42`, 40 registered tables and one album UUID: 35 ordinary,
 one external-content FTS5 virtual table and four explicitly registered shadows
 (excluding internal `sqlite_sequence`). `open` uses a read-only
 connection, validates format/integrity and returns identity/counts/coverage. It
@@ -50,7 +50,7 @@ and `database_path` (actual absolute location). Moving or renaming the file chan
 its location/display name, not its UUID. Copies/backups preserve that same identity;
 they are not independently mergeable branches.
 
-Existing v1–v9 databases are rejected unchanged; unrelated SQLite files and damaged
+Existing v1–v10 databases are rejected unchanged; unrelated SQLite files and damaged
 files also error, not reinitialized or migrated. Keep old user databases and backups untouched.
 Creating a separately requested new album is not a conversion of the old one.
 See the [storage summary](#storage-summary).
@@ -62,7 +62,7 @@ not another album/file selector. Their unchanged tables are
 is primary and needs no index; the Skill writes a one-element ID array for a single
 photo. Names are unique by trimmed NFC + casefold; rename preserves the stable ID.
 Removing membership/deleting a folder never deletes photo data or other memberships.
-There is no automatic regrouping, hierarchy or fourth capability.
+Folder management adds no automatic regrouping, hierarchy or separate capability.
 
 See [management](management.md) for folder commands, explicit union/intersection
 browse/search scope and confirmed one-time EXIF date plans. Reports use
@@ -75,7 +75,8 @@ Stage 2 OR search is implemented through separate legacy [condition commands](se
 
 The installed Skill needs these operational boundaries, not a repository schema-development history:
 
-- The 32 ordinary tables hold album identity, photos/current previews and scans; six `image_embedding_*` tables; the two virtual-folder tables; and 19 feature tables for profiles, results, typed evidence, dependencies, settings, jobs, prototypes and pairs.
+- The 35 ordinary tables hold album identity, photos/current previews and scans; six `image_embedding_*` tables; the two virtual-folder tables; 19 feature tables for profiles, results, typed evidence, dependencies, settings, jobs, prototypes and pairs; and `ai_review_results`, `ai_review_runs`, `ai_review_batches`.
+- Optional [AI review](review.md) stores typed score/description projections and fixed versioned JSON in one result table, plus two operational tables. It adds no FTS or public review search in v1. Whole-task approval precedes any SDK/auth/model contact, and every retry requires fresh state-bound approval; opening/selecting an album never authorizes it.
 - `image_ocr_documents` is authoritative saved text. `image_ocr_fts` and its four registered shadows are derived external-content FTS5 storage. Only explicit `index rebuild-fts --confirm` rebuilds it; open and search never perform repairs.
 - Paths locate originals, while saved content/profile/input identities govern reuse and current-result eligibility. Old profile/input results are not automatically deleted. Historical inspection is not current coverage or proof that dependencies remain intact.
 - Legacy `album-snapshot-v2` exports retain historical album/folder scope. Legacy OR queries use separate `condition-search-snapshot-v1` private snapshots and `condition-search-page-v1` public pages. Unified search uses private review/selected snapshots and compact numbered evidence. These files are not tables, backups, live rules or authorization for membership writes; no schema change or reindexing is needed.
@@ -143,8 +144,8 @@ compatible Python environments must be provisioned separately on each host.
 
 `management backup` uses SQLite's consistent backup API and refuses an existing
 destination. It includes saved metadata, previews, profiles, vectors, feature evidence/dependencies,
-scene prototypes, OCR FTS, runs and folder memberships, but
-not originals or model/runtime files. A moved backup can browse saved previews;
+scene prototypes, OCR FTS, AI review results/runs/batches and folder memberships, but
+not originals, credentials or model/runtime files. A moved backup can browse saved previews;
 originals resolve only if an absolute location or relative layout still works.
 Otherwise explicitly relink them. Do not write independently to both copies and
 expect automatic conflict merging.

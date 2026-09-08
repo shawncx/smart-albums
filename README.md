@@ -1,14 +1,15 @@
 # Smart Albums
 
-**One album is one SQLite file.** One photography Skill exposes exactly three independent capabilities:
+**One album is one SQLite file.** One photography Skill exposes exactly four independent capabilities:
 
 | Capability | Purpose |
 | --- | --- |
 | **ingestion** | Import local photo metadata, original paths and proportional JPEG previews into the selected album. |
 | **index** | Explicitly set up/configure, plan, generate/reuse, inspect and resume image embeddings or six opt-in local feature components. |
 | **management** | Create/open/backup the album file, manually manage static virtual folders, browse/search within explicit scopes, organize by saved date and locate/relink originals. |
+| **review** | Explicitly plan and approve optional Copilot photo reviews of saved previews; inspect structured scores, results and history. |
 
-These are not an automatic pipeline. Ingestion never calls a model. Browse/search never writes the database or checks original files; creation, folder membership and original-path maintenance are explicit management operations. The program never deletes originals or automatically regroups folders.
+These are not an automatic pipeline. Ingestion never calls a model. Browse/search never writes the database or checks original files; creation, folder membership and original-path maintenance are explicit management operations. Review is never triggered by ingestion, index or search. The program never deletes originals or automatically regroups folders.
 
 ## Install the base Skill
 
@@ -21,7 +22,7 @@ python -m venv .venv
 
 The optional model runtime is narrower: **standard, GIL-enabled CPython 3.14, 64-bit x86-64**, with pinned Windows CPU dependencies. Portable album files do not imply that this runtime supports ARM, other Python versions or every host. See [index setup](photography/references/index.md); do not install into a shared interpreter.
 
-Copy the entire `photography` directory into your host's supported Skill directory as `smart-albums`. Its entry is [photography/SKILL.md](photography/SKILL.md). This directory is the complete distributable Skill: its runtime references, scripts and requirements files are self-contained. Repository `docs` and `tests` are development material, not installation dependencies. Do not copy virtual environments, model caches or album files into the Skill. The host needs local Python execution and access to the selected album and requested files.
+Copy the entire `photography` directory into your host's supported Skill directory as `smart-albums`. Its entry is [photography/SKILL.md](photography/SKILL.md). This directory is the complete distributable Skill: its runtime references, scripts, requirements files and versioned [photo-review-v1.txt](photography/prompts/photo-review-v1.txt) prompt are self-contained. Repository `docs` and `tests` are development material, not installation dependencies. Do not copy virtual environments, model caches or album files into the Skill. The host needs local Python execution and access to the selected album and requested files.
 
 The examples below run from a repository checkout. After installation, replace `photography` in script/requirements paths with the absolute installed Skill directory; do not resolve them against the host's working directory. Using the chosen environment's interpreter, verify the installed entry without an album or models:
 
@@ -150,7 +151,7 @@ python photography\scripts\photography.py --database <absolute-album.sqlite> man
 python photography\scripts\photography.py --database <absolute-album.sqlite> management folders delete <folder-id>
 ```
 
-For one photo, the Skill writes a one-element JSON ID array using its actual ID. `[]` means no changes, never all photos. Names are trimmed, nonempty and control-character-free, unique by NFC + casefold; rename preserves the stable folder ID. A photo may belong to several folders or none. Removing membership/deleting a folder never deletes photos, originals, previews or embeddings, or affects other memberships. Batches validate all IDs and commit atomically; duplicates/unchanged members are reported. `photo` includes memberships; folder lists show counts. No hierarchy, live rules, jobs or fourth capability is added.
+For one photo, the Skill writes a one-element JSON ID array using its actual ID. `[]` means no changes, never all photos. Names are trimmed, nonempty and control-character-free, unique by NFC + casefold; rename preserves the stable folder ID. A photo may belong to several folders or none. Removing membership/deleting a folder never deletes photos, originals, previews or embeddings, or affects other memberships. Batches validate all IDs and commit atomically; duplicates/unchanged members are reported. `photo` includes memberships; folder lists show counts. Folder management adds no hierarchy, live rules, jobs or separate capability.
 
 ### Browse and search
 
@@ -198,7 +199,7 @@ Metadata mode uses Unicode NFC/casefold literal substrings in filenames and reco
 
 **Semantic text preparation:** the host agent keeps the user's original request in `query` and, using **text only**, supplies its English visual intent in `--visual-query`. Preserve scene, actions, colors, negation and count constraints; remove search verbs without inventing details. For “搜索带有天空的图片”, use `sky`, not an added blue, clear, dominant or outdoor restriction. If faithful translation is uncertain, clarify rather than replace the request with guessed keywords. Python does not translate: an unprepared non-Latin request fails with `VISUAL_QUERY_REQUIRED`. Already-English visual input may omit the flag. Never translate literal metadata or OCR searches; `--visual-query` is rejected in metadata mode.
 
-All semantic entry points use one fixed recipe, `english-visual-intent-v1`: encode the NFC-normalized English visual phrase directly, with no prefix, caption template or ensemble. The frozen recipe has `prompts: [visual_query]` and `weights: [1.0]`, not selectable versions or caller-provided prompts/weights. There is exactly one text encoder call per unique semantic condition with eligible vectors (`model_calls: 1` for plain search), and zero without candidates. The prompt has a 64-token limit including EOS; `QUERY_TOO_LONG` rejects overflow without truncation. This query-side preparation leaves the image profile, checkpoint, 768-dimensional vectors and schema 10 unchanged; no image reindexing is required.
+All semantic entry points use one fixed recipe, `english-visual-intent-v1`: encode the NFC-normalized English visual phrase directly, with no prefix, caption template or ensemble. The frozen recipe has `prompts: [visual_query]` and `weights: [1.0]`, not selectable versions or caller-provided prompts/weights. There is exactly one text encoder call per unique semantic condition with eligible vectors (`model_calls: 1` for plain search), and zero without candidates. The prompt has a 64-token limit including EOS; `QUERY_TOO_LONG` rejects overflow without truncation. This query-side preparation leaves the image profile, checkpoint, 768-dimensional vectors and current schema 11 unchanged; no image reindexing is required.
 
 Plain snapshots retain `query_encoding` with `strategy`, `query`, `visual_query`, `prompts` and `weights`. Preserve it through `show-results` and search-selected folder-add provenance. Show the user the actual encoded text from this recipe, not just the original request; do not edit frozen recipes or infer retrieval quality from their presence.
 
@@ -256,6 +257,38 @@ python photography\scripts\photography.py --database <absolute-album.sqlite> man
 
 Planning requires exactly `--all` or `--ids-file`; `--granularity` accepts `year|month|day`. It uses saved EXIF `datetime_original`, valid camera-local calendar dates with no UTC conversion or fallback to file times. Missing/invalid dates and unavailable ingestion metadata are skipped with counts, without originals/models. This is authorized deterministic organization, not semantic evidence. Review exact scope, create/reuse folder preview, members, skips and digest before applying. CLI output is an envelope (`plan`, `digest`, `output`, `album`, `model_calls: 0`); the file is the raw plan. Apply checks conflicts/staleness and atomically creates/reuses folders and adds members. No live rules, new jobs/tables or automatic regrouping of future imports/removals.
 
+## review: optional, explicitly approved AI photography reviews
+
+Review uses only existing, strictly validated **stored JPEG previews**, not originals or automatic ingestion. It is independent of local search's numbered evidence review: `review_id` / `--review-snapshot` do not authorize cloud photo review. There is **no review-aware search entry in v1**; existing local ingestion/index/search behavior is unchanged.
+
+Use the selected database prefix above, actual photo IDs and an explicit Copilot vision model ID (never `auto`):
+
+```text
+review rubric
+review models --confirm-provider-access
+review plan --photo-id <photo-id> --model <model-id>
+review plan --ids-file <absolute-json-file> --model <model-id> [--batch-size 4] [--language zh-CN|en] [--force] [--dry-run]
+review execute <run-id> --confirm <digest>
+review job <run-id>
+review resume <run-id> --confirm <retry-digest> [--confirm-stopped]
+review result <photo-id>
+review history <photo-id> [--limit N] [--after <cursor>]
+review report <run-id> --output <absolute-new.html>
+```
+
+- **Approve contact, not just uploads.** `review models` requires separate approval and `--confirm-provider-access`; without it, `CONFIRMATION_REQUIRED` occurs before SDK construction. Authentication/model probes contact Copilot too. Model-list approval does not approve a photo task.
+- **Plan locally, approve the whole task.** `--photo-id` and `--ids-file` are mutually exclusive; the latter is an absolute JSON file containing a nonempty array of actual photo IDs. Planning freezes scope, actual preview dimensions/bytes, model/configuration, cloud-transfer disclosure, language (default `zh-CN`), cached work and batches. Present the plan and digest in the user's language before execution. Help/planning/read commands never construct the SDK; `--dry-run` saves nothing.
+- **Bounded, resumable work.** Default batch size is 4, with a smaller final batch; each photo is judged independently, never ranked against batch companions. Validate model limits without silently resizing/repacking or substituting models. Reuse input/configuration-matching results; `--force` appends history. Whole batches commit atomically; failure stops subsequent sends while preserving completed batches. Every retry/resume needs fresh state-bound approval from `review job`, not the original or a consumed digest. Confirm all workers stopped before `--confirm-stopped`. No automatic retry or fallback; uncertain sends may already have been charged.
+- **Strict structured success.** The bundled rubric/output schema is `photo-review-v1`. Each review has `description`, `strengths`, `improvements`, `limitations` and `scores` for `composition`, `lighting`, `color`, `subject`, `storytelling`, `technical`: each score is 0–10 with a reason. The application computes the equal-weight mean, rounded once to two decimal places with decimal half-up. Invalid JSON/prose is failure, never raw-review persistence. Technical scores describe visible preview execution, not measured original focus/noise.
+
+The optional [requirements-review.txt](photography/requirements-review.txt) pins `github-copilot-sdk==1.0.13` with runtime **1.0.83**; install/provision only with explicit authorization in a compatible project environment. No implicit SDK installation, runtime download or login occurs. The default uses existing local Copilot credentials with `mode="copilot-cli"` / `use_logged_in_user=True`, no separate token required. Child-only credential overrides are excluded; safe owned working/session state does not move the credential home. These controls are not an OS sandbox; they offer neither a no-logs assurance nor a retention or exact-charge guarantee.
+
+`review report` is an optional **read-only album operation** exporting a **no-overwrite, self-contained HTML** file at a new absolute `.html` path. It reads saved reviews/previews, makes no SDK call and uses no external network resources; it does not write the album, read originals or initiate review. The user can view photos, scores/reasons, limitations, provenance, active timings and available provider-reported tokens/credits locally. Active execution time excludes user confirmation waits and report generation. Missing usage is not zero: unreported values remain unknown, and retry totals may be incomplete. Copilot credits are not Azure credits; never invent prices or convert usage into Azure charges. Multi-image batch metrics are shared, not per-photo values, and are never summed once per image.
+
+For a random 10-photo trial from a user-provided source folder, `--batch-size 1` can attribute request usage to one photo, while multi-image requests provide only batch measurements. The product default remains 4; the completed authorized trial used 4+4+2 as requested. Freeze and present sampled IDs, model, cloud transfer, configuration and digest: **the trial requires explicit approval of its frozen plan before provider contact**. Each retry needs new approval and preserves known earlier attempt usage; never invent missing timings/tokens/credits.
+
+See [review setup, approval and result contract](photography/references/review.md). **Authorized live Copilot validation completed** for 10 photos with Claude Sonnet 5: batches 4+4+2, structured persistence/reopen, observed usage, owned-session cleanup and a local report. This does not establish general review quality, exact account charges or provider retention guarantees.
+
 ## Portable paths, cache and backups
 
 SQLite can be beside, above, below or on a different drive from photos. Each photo records an absolute original path and a nullable path relative to the **current database parent**, including `..`. Explicit original lookup prefers the absolute path. Only when it is missing does a usable relative path repair the absolute location; an absolute hit does not silently rewrite the relative path. Both missing means source missing; permissions/I/O failures are separate errors. Read-only repair failure is reported, never claimed as success.
@@ -264,13 +297,13 @@ Relink requires matching SHA-256 and updates both paths. Path-only repair preser
 
 Models are shared machine-local files, independent of albums: `Config.model_cache_root` defaults to `%LOCALAPPDATA%\SmartAlbums\models` on Windows or the platform's application cache elsewhere. Optional global `--model-cache-dir <cache-root>` precedes `index` or `management` and works consistently for setup, execution and semantic search. A known older model cache can be reused by explicitly selecting its root; it is not automatically moved or deleted.
 
-Use **one writer on one device at a time**. For cloud storage: download a complete local file, operate locally, stop/close all operations, then copy or sync it back. Do not copy an actively written bare SQLite file or delete its sidecars. `management backup --output <new-file>` makes a consistent no-overwrite SQLite snapshot containing previews, embeddings, feature results/prototypes and virtual folder memberships, **not originals, model weights or Python environments**. Each host needs its own compatible runtime/cache.
+Use **one writer on one device at a time**. For cloud storage: download a complete local file, operate locally, stop/close all operations, then copy or sync it back. Do not copy an actively written bare SQLite file or delete its sidecars. `management backup --output <new-file>` makes a consistent no-overwrite SQLite snapshot containing previews, embeddings, feature results/prototypes, AI review results/runs/batches and virtual folder memberships, **not originals, model weights, credentials or Python environments**. Each host needs its own compatible runtime/cache.
 
 ## Format and validation status
 
-New albums use **schema 10**, `application_id = 0x53414C42`, and **37 registered tables**: 32 ordinary tables, one external-content OCR FTS5 virtual table and four explicitly registered shadow tables (SQLite's internal `sqlite_sequence` is excluded). The existing six `image_embedding_*` tables and `virtual_folders` / `virtual_folder_photos` remain separate from the new feature profiles/results, typed details, manifests, dependencies and jobs. See the [complete schema inventory](docs/index-design.md#3-schema-10-37-registered-tables). No internal albums/libraries or empty `technical_*` placeholders are added.
+New albums use **schema 11**, `application_id = 0x53414C42`, and **40 registered tables**: 35 ordinary tables, one external-content OCR FTS5 virtual table and four explicitly registered shadow tables (SQLite's internal `sqlite_sequence` is excluded). The existing six `image_embedding_*` tables and `virtual_folders` / `virtual_folder_photos` remain separate from feature storage and the new `ai_review_results`, `ai_review_runs`, `ai_review_batches`. One typed score/text result table plus fixed versioned JSON paths supports future querying; review adds no FTS or public search/ranking integration. See the [complete schema inventory](docs/index-design.md#3-schema-11-40-registered-tables). No internal albums/libraries or empty `technical_*` placeholders are added.
 
-Existing v1–v9 databases are **rejected unchanged**: no migration, cleanup, overwrite or old multi-album CLI/API compatibility. The user's old database and backups must remain untouched. Legacy management snapshots remain `album-snapshot-v2`; legacy condition queries separately use `condition-search-snapshot-v1` and public `condition-search-page-v1`. Unified search adds private review snapshots, not database tables. Existing static reports are not converted.
+Existing v1–v10 databases are **rejected unchanged**: no migration, cleanup, overwrite or old multi-album CLI/API compatibility. The user's old database and backups must remain untouched. Legacy management snapshots remain `album-snapshot-v2`; legacy condition queries separately use `condition-search-snapshot-v1` and public `condition-search-page-v1`. Unified search adds private review snapshots, not database tables. Existing static reports are not converted.
 
 Stage-one regression and authorized synthetic integration have passed; see [validation status](docs/TODO.md). The isolated vision suite passed 27 tests, and all six components persisted results for three synthetic photos; 18 results remained readable from a backup with originals offline. Downloaded assets total 35,408,916 bytes (approximately 35.4 MB), with existing SigLIP weights reused. This covers **synthetic evaluation only**; ordinary YOLOX use remains license-gated. Real-photo quality, performance, cross-host support and OS-level network-isolation guarantees do not follow from these checks.
 
@@ -284,6 +317,6 @@ python -m unittest discover -s tests -v
 - [Portable-album implementation plan](docs/portable-album-plan.md) (plan text, not live completion status)
 - [Earlier implementation plan](docs/ingestion-index-management-plan.md) (historical; superseded for storage/CLI)
 - [Pending validation and future work](docs/TODO.md)
-- [Code-review follow-up discussion (中文; deferred proposals, not approved capabilities)](docs/code-review-follow-up.zh-CN.md)
+- [Code-review follow-up discussion (中文; historical deferred proposals, not the current feature contract)](docs/code-review-follow-up.zh-CN.md)
 
 Private databases, photos, weights and generated reports are not distributed with the Skill. Pushing this repository does not back up an album or its originals.

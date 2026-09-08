@@ -3,6 +3,7 @@
 **One album corresponds to one SQLite file.** Selecting/creating that file is the
 entry to ingestion, index, management and review, not another capability or a selection
 of a library followed by an internal album. The file-based interface is implemented.
+For a conceptual explanation of the file/folder distinction, see [album concepts](albums.md).
 
 ## Entry workflow
 
@@ -69,7 +70,7 @@ browse/search scope and confirmed one-time EXIF date plans. Reports use
 `album-snapshot-v2`, preserving historical scope even after folder changes.
 Stage-one [feature components](index.md#stage-1-six-opt-in-components) are explicit
 index operations, not new capabilities or automatic work when opening a file.
-Stage 2 OR search is implemented through separate legacy [condition commands](search.md#stage-2-or-condition-workflow); targeted integration checks have passed. Explicit legacy metadata/semantic behavior is unchanged. New natural-content requests use [default unified search](search.md#unified-query-json): 100 globally deduplicated candidates by default, any explicitly requested positive count or `all`, compact numbered facts and snapshot-bound `review_id`. All queries open the selected album read-only, without DDL, migration, defaults or automatic membership changes; private snapshots/public evidence are exports, not new tables.
+Stage 2 OR search is implemented through separate legacy [condition commands](search-legacy.md#stage-2-or-condition-workflow); targeted integration checks have passed. Explicit legacy metadata/semantic behavior is unchanged. New natural-content requests use [default unified search](search.md#unified-query-json): 100 globally deduplicated candidates by default, any explicitly requested positive count or `all`, compact numbered facts and snapshot-bound `review_id`. All queries open the selected album read-only, without DDL, migration, defaults or automatic membership changes; private snapshots/public evidence are exports, not new tables.
 
 ## Storage summary
 

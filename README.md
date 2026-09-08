@@ -1,5 +1,7 @@
 # Smart Albums
 
+The agent entrypoint is intentionally compact. Operational details live in the [task references](photography/SKILL.md#route-to-the-relevant-reference); [local authorization](photography/references/authorization.md) reuses clear task consent while retaining plan/digest validation. Explicit legacy search is documented separately in [search compatibility](photography/references/search-legacy.md).
+
 **One album is one SQLite file.** One photography Skill exposes exactly four independent capabilities:
 
 | Capability | Purpose |
@@ -55,18 +57,18 @@ python photography\scripts\photography.py --database <absolute-album.sqlite> ing
 
 Saved previews preserve aspect ratio: default longest edge 1024, JPEG quality 85, no upscaling. Repeated scans reuse unchanged inputs. Only ingestion updates content versions; changed inputs make historical embeddings ineligible for current search without deleting their history.
 
-After import, the Skill explains the returned `index_prompt` and explicitly asks, **in the user's language**, whether to prepare an index for its exact successful, not-ready photo IDs:
+After import, if indexing was not already requested and `index_prompt` is non-null, the Skill explains and offers indexing once, **in the user's language**, for the returned successful, not-ready photo IDs:
 
 - **Without an index:** browse photos, saved previews and basic metadata; find filenames/recorded paths and folder names; create/manage custom folders, manually add/remove photos and prepare/apply confirmed EXIF date organization.
 - **With a valid index and matching local model:** also search visible content in Chinese or English. Results are similar candidates, not guaranteed detections or exact filters.
 
-Fully indexed repeat scans do not prompt again. Importing, accepting the invitation or choosing an album never automatically downloads a model or authorizes an unseen execution plan. See [ingestion](photography/references/ingest.md).
+Fully indexed repeat scans do not prompt again. A request to import and index, or acceptance of the offer to create the index, authorizes inspecting and executing its local plan within that scope without another consent question. Import-only, file-selection and plan-only requests do not authorize index execution. Model/dependency provisioning still needs explicit authorization. See [ingestion](photography/references/ingest.md) and [local authorization](photography/references/authorization.md).
 
 ## index: explicit setup, configuration and execution
 
 `ocr`, `objects`, `scene`, `color`, `composition` and `perceptual_hash` are components inside index, not six new public capabilities. Existing commands without `--component` still select `image_embedding`; ingestion invitations and explicit legacy metadata/semantic behavior are unchanged. **Stage 2 OR search is implemented** as separate legacy management commands consuming saved evidence; targeted integration checks have passed, not a real-photo quality claim. New natural-content requests use unified search below.
 
-Install image-embedding dependencies in a dedicated compatible CPython 3.14 x64 virtual environment. Model download and real-model trials require separate authorization; code approval is not that authorization.
+Install image-embedding dependencies in a dedicated compatible CPython 3.14 x64 virtual environment. Provisioning and real-model trials require explicit authorization; reuse permission already given. Code approval alone is not that authorization.
 
 ```text
 python -m pip install -r photography\requirements-index.txt
@@ -129,7 +131,7 @@ index pairs <feature-run-id> --limit 100 --after 0
 index rebuild-fts --confirm
 ```
 
-Setup/registration never selects a default; each component has its own configuration. `prototypes` and `compare` **prepare plans**, not computations; execute the returned `feature_...` run only after exact-digest approval, including non-ML computations. Omit `--dry-run` to persist a prototype plan. Text encoding happens only during approved prototype execution; scene and composition report `dependency_missing` rather than automatically indexing other components or the whole album.
+Setup/registration never selects a default; each component has its own configuration. `prototypes` and `compare` **prepare plans**, not computations; inspect the returned `feature_...` plan and execute within the user's existing local authorization, including non-ML computations, without asking again per digest. Omit `--dry-run` to persist a prototype plan. Text encoding happens only during approved prototype execution; scene and composition report `dependency_missing` rather than automatically indexing other components or the whole album.
 
 Feature status is `ready|missing|stale|invalid_input|invalid_result|dependency_missing`, separate from execution-item state. Profiles version output-affecting parameters/assets/recipes; `input_fingerprint` binds content and exact dependencies, not paths. History remains inspectable. Status/result reads do not stat originals or run inference; a ready OCR result describes the last ingested content, not live disk verification.
 
@@ -244,7 +246,7 @@ management show-query-results <ranked.json> --limit 100 --after <opaque-cursor>
 management query-pairs <ranked.json> --condition-id G --limit 100 --output <pairs.json>
 ```
 
-Use `multi-condition-query-v1` with `operator: "or"` and stable condition IDs. Supported kinds are `semantic`, `object_count`, `ocr_contains`, `color_fraction`, `subject_position`, `scene` and `has_near_duplicate` (saved exact SHA-256 or dHash64 Hamming, not pHash). Discover profile IDs and supported object/scene catalogs with `index profiles --component <component>`; defaults resolve once and freeze. Duplicate predicates deduplicate with `aliases`. See the [complete query and decision JSON contracts](photography/references/search.md#stage-2-or-condition-workflow).
+Use `multi-condition-query-v1` with `operator: "or"` and stable condition IDs. Supported kinds are `semantic`, `object_count`, `ocr_contains`, `color_fraction`, `subject_position`, `scene` and `has_near_duplicate` (saved exact SHA-256 or dHash64 Hamming, not pHash). Discover profile IDs and supported object/scene catalogs with `index profiles --component <component>`; defaults resolve once and freeze. Duplicate predicates deduplicate with `aliases`. See the [complete query and decision JSON contracts](photography/references/search-legacy.md#stage-2-or-condition-workflow).
 
 A semantic condition accepts optional `visual_query` with the same text-only role as `--visual-query`, retaining the original `query`. Different original requests with the same prepared visual phrase/profile deduplicate to one logical semantic condition, excluding `id` and `scoring` from predicate identity under the existing scoring rules. NFC normalization applies both with explicit `visual_query` and to direct English input. Paraphrases must not increase `matched_count`.
 
@@ -269,7 +271,7 @@ python photography\scripts\photography.py --database <absolute-album.sqlite> man
 python photography\scripts\photography.py --database <absolute-album.sqlite> management folders apply-date-plan <date-plan.json> --confirm <digest>
 ```
 
-Planning requires exactly `--all` or `--ids-file`; `--granularity` accepts `year|month|day`. It uses saved EXIF `datetime_original`, valid camera-local calendar dates with no UTC conversion or fallback to file times. Missing/invalid dates and unavailable ingestion metadata are skipped with counts, without originals/models. This is authorized deterministic organization, not semantic evidence. Review exact scope, create/reuse folder preview, members, skips and digest before applying. CLI output is an envelope (`plan`, `digest`, `output`, `album`, `model_calls: 0`); the file is the raw plan. Apply checks conflicts/staleness and atomically creates/reuses folders and adds members. No live rules, new jobs/tables or automatic regrouping of future imports/removals.
+Planning requires exactly `--all` or `--ids-file`; `--granularity` accepts `year|month|day`. It uses saved EXIF `datetime_original`, valid camera-local calendar dates with no UTC conversion or fallback to file times. Missing/invalid dates and unavailable ingestion metadata are skipped with counts, without originals/models. This is authorized deterministic organization, not semantic evidence. Review exact scope, create/reuse folder preview, members, skips and digest before applying. CLI output is an envelope (`plan`, `digest`, `output`, `album`, `model_calls: 0`); the file is the raw plan. Within an already requested organization task, inspect and apply without another consent question. Apply checks conflicts/staleness and atomically creates/reuses folders and adds members. No live rules, new jobs/tables or automatic regrouping of future imports/removals.
 
 ## review: optional, explicitly approved AI photography reviews
 

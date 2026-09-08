@@ -22,7 +22,7 @@ from photography_lib.config import PhotographyError
 from photography_lib.fingerprints import fingerprint
 from photography_lib.image_embedding_storage import IMAGE_EMBEDDING_SCHEMA
 from photography_lib.image_feature_storage import IMAGE_FEATURE_SCHEMA
-from photography_lib.review_schema import DIMENSIONS, overall_score, review_profile
+from photography_lib.review_schema_v1 import DIMENSIONS, overall_score, review_profile
 from photography_lib.review_storage import REVIEW_TABLES, review_schema_registry
 from photography_lib.sqlite_storage import APPLICATION_ID, REQUIRED_COLUMNS, SCHEMA, SQLiteStorage
 from photography_lib.virtual_folder_storage import VIRTUAL_FOLDER_SCHEMA
@@ -114,7 +114,7 @@ class ReviewStorageTests(unittest.TestCase):
         return results
 
     def test_exact_schema_and_typed_score_index_registration(self):
-        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], 11)
+        self.assertEqual(self.store.db.execute("PRAGMA user_version").fetchone()[0], 12)
         tables = {row[0] for row in self.store.db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*'")}
         self.assertEqual(tables, set(REQUIRED_COLUMNS))

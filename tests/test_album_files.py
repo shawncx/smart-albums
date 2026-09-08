@@ -131,7 +131,7 @@ class AlbumFileTests(unittest.TestCase):
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*'")}
             self.assertEqual(tables, set(REQUIRED_COLUMNS))
             self.assertEqual(len(tables), 40)
-            self.assertEqual(SCHEMA_VERSION, 11)
+            self.assertEqual(SCHEMA_VERSION, 12)
             self.assertEqual(store.photos(), [])
             album = store.album()
             self.assertEqual(album["name"], self.path.stem)

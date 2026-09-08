@@ -1,6 +1,6 @@
 # 项目待办
 
-当前合同见 [便携相册、本地特征与 AI Review 设计](index-design.md)。[便携相册实施计划](portable-album-plan.md) 保留 schema 8 历史里程碑及 schema 10 后续记录，不是 schema 11 四能力的实时进度；[早期实施计划](ingestion-index-management-plan.md) 的多相册、旧 CLI 和迁移设计亦已被取代。[代码审查后续讨论](code-review-follow-up.zh-CN.md) 保留当时提案，不是当前合同。以下区分实现范围、历史回归及待核实验收，不发布私人路径、照片或报告数据。
+当前合同见 [便携相册、本地特征与 AI Review 设计](index-design.md)。[便携相册实施计划](portable-album-plan.md) 保留 schema 8 历史里程碑及 schema 10 后续记录，不是 schema 12 四能力的实时进度；[早期实施计划](ingestion-index-management-plan.md) 的多相册、旧 CLI 和迁移设计亦已被取代。[代码审查后续讨论](code-review-follow-up.zh-CN.md) 保留当时提案，不是当前合同。以下区分实现范围、历史回归及待核实验收，不发布私人路径、照片或报告数据。
 
 ## 当前四能力范围
 
@@ -14,7 +14,7 @@
 ## 已实现代码范围
 
 - **一个相册一个 SQLite 文件。** 先明确选择已有文件或创建新文件；已选择则不重复询问，普通说明性问题无需选库。全局必填 `--database <绝对路径>`，支持 `.sqlite/.sqlite3/.db`；无默认库、`--state-dir`、旧别名或内部 album/library 选择。换文件清空旧 photo/profile/run/folder 和待确认上下文。
-- **新格式边界。** schema 11、`application_id=0x53414C42`，40 张注册表：35 张普通表、1 张 external-content FTS5 虚拟表、4 张显式登记的影子表（不计 SQLite 内部 `sqlite_sequence`）。完整清单见现行设计；原六张 `image_embedding_*` 不变，公共 feature 配置/结果/manifest/依赖/任务及类型明细独立存储。新增 `ai_review_results` 单一分数/文本/固定 JSON 路径结果表，及 `ai_review_runs`、`ai_review_batches` 运行表，不新增 FTS。`virtual_folders`、`virtual_folder_photos` 保留。没有旧多相册或空 `technical_*` 表。旧 v1–v10 数据库原样拒绝，不迁移、清空或覆盖；真实旧库及备份保持不动。管理快照仍为 `album-snapshot-v2`。
+- **新格式边界。** schema 12、`application_id=0x53414C42`，40 张注册表：35 张普通表、1 张 external-content FTS5 虚拟表、4 张显式登记的影子表（不计 SQLite 内部 `sqlite_sequence`）。完整清单见现行设计；原六张 `image_embedding_*` 不变，公共 feature 配置/结果/manifest/依赖/任务及类型明细独立存储。新增 `ai_review_results` 单一分数/文本/固定 JSON 路径结果表，及 `ai_review_runs`、`ai_review_batches` 运行表，不新增 FTS。`virtual_folders`、`virtual_folder_photos` 保留。没有旧多相册或空 `technical_*` 表。旧 v1–v10 数据库原样拒绝，不迁移、清空或覆盖；真实旧库及备份保持不动。管理快照仍为 `album-snapshot-v2`。
 - **手动文件夹是基础功能。** `management folders` 支持自定义空文件夹、名称查询、创建/查看/重命名/删除及单张或批量 add/remove，均无需 index。Skill 把用户指定单张照片写成单元素真实 ID 数组；`[]` 是零变更而非全相册。名称去空白后非空、拒绝控制字符，NFC + casefold 唯一；重命名保留稳定 ID。一个 SQLite 内静态、平铺、多对多成员；全量验证 ID 后事务写入，错误整体回滚，重复/无变化明确计数。移出/删文件夹只删关系，不删照片/原图/缩略图/向量，不影响其他归属；关系随备份/移动保存。
 - **范围浏览与搜索。** photos 和两种 search 均支持重复 `--folder-id`；多个不同 ID 必须明确 `--folder-match union|intersection`。不指定即全相册，未知文件夹报错不兜底，空范围无结果不加载 encoder（语义模式仍需有效显式/默认 profile）。先范围过滤再检查向量/排名/top-K，并集去重；计数、分页、覆盖率及分差按范围。metadata 的 `album_total` 为真实全库数，另报 `scope_total`。
 - **可选一次性整理。** 搜索结果 add 使用明确目标/ID 和 `--search-snapshot`，复用 `management.select_search_results` 验证，不重查、不编码图片、不默认加入全部 top-K 或移除来源关系。日期计划严格 `--all` 或 `--ids-file`，按已保存且日历合法的 EXIF `datetime_original` 相机本地日期，无 UTC 转换/文件时间兜底；缺失/非法/不可用导入元数据跳过并计数。CLI 回传 `plan/digest/output/album/model_calls: 0` envelope，文件是 raw plan；展示创建/复用和确切成员范围后，以 `apply-date-plan --confirm` 明确应用，冲突/过期报错、原子写入。不加任务表/动态规则，不自动补入后续导入或手动移出的照片。
@@ -39,7 +39,7 @@
 
 ### 第二阶段新增范围（代码已实现，定向集成验收已通过）
 
-- Stage 2 OR search 独立提供 `management query`、`query-evidence`、`finalize-query`、`show-query-results`、`query-pairs`，metadata/semantic 原接口与默认保持 unchanged。`multi-condition-query-v1` 支持语义、数量、OCR、颜色比例、主体位置、scene 和 exact/dHash64 近重复条件；通过 `index profiles --component` 发现配置/词表，冻结 profile/scope/seed，重复条件去重并保留 aliases。查询不改变当前 schema 11、40 张注册表，无 DDL/默认/图片推理/下载/自动文件夹写入。
+- Stage 2 OR search 独立提供 `management query`、`query-evidence`、`finalize-query`、`show-query-results`、`query-pairs`，metadata/semantic 原接口与默认保持 unchanged。`multi-condition-query-v1` 支持语义、数量、OCR、颜色比例、主体位置、scene 和 exact/dHash64 近重复条件；通过 `index profiles --component` 发现配置/词表，冻结 profile/scope/seed，重复条件去重并保留 aliases。查询不改变支持的 schema 11/12、40 张注册表，无 DDL/默认/图片推理/下载/自动文件夹写入。
 - query 只输出安全摘要与私有快照路径；agent 禁止读取 private snapshot / feature matrix、OCR、scene 或像素判断语义，只看 `query-evidence` 查询/ID/分数/排名/分差。`condition-decisions-v1` 每页明确 matched IDs（允许 `[]`），全部语义页评审后才计算命中数/排名；top-K 不是 matched，unknown 不是否定。无待评审语义项直接 finalized。
 - OR 命中数优先；exact 命中为 1，graded 为该条件命中总体平均秩百分位（方向、同分、单项/全相等规则固定）。仅同 matched-ID 集合比较等权均分；同命中数不同组合按保存 seed 随机交织，不承诺 RRF/顶层 AND/pHash。finalize `model_calls: 0`，保留历史 `query_model_calls`。
 - 公共 `condition-search-page-v1` 区分整个 scope 的 input `coverage`（语义 `not_reviewed` 表示查询时 eligible）与 candidate pool 的 final `evaluated_coverage`，解释候选上限/部分覆盖。全局 result_rank 与 opaque cursor 在排名后分页；只读历史范围、不查原图、不重查当前成员。所有导出目标先校验，并保护输入/alias/hardlink；用户专用 HTML 只渲染本页匹配身份预览，转义文本/CSP，无脚本/表单/控件/backend，agent 不打开/截图/读取图片。
@@ -54,7 +54,7 @@
 
 - 独立第四能力；CLI/安装说明见 [review](../photography/references/review.md)。仅用户明确选择已有 photo ID 和模型，严格校验保存的 JPEG 预览，不发原图、路径、EXIF 或相册身份。默认批次 4、允许尾批，逐图独立评价，不做组内排名。原有本地 ingestion/index/search 不变；v1 不新增 review 搜索入口，仅为未来查询保留结构化存储。
 - `review models --confirm-provider-access` 是独立批准的提供方联系；没有标志须 `CONFIRMATION_REQUIRED`，不得构造 SDK。认证/模型探测也算联系 Copilot。help/plan/rubric/job/result/history 无 SDK 构造；dry-run 不保存。整任务计划显示云传输、确切范围、模型/语言/输入大小、缓存及批次，实际批准后才可构造 SDK、认证、建 session 或上传；旧任务、代码批准和 models 批准不可替代。
-- `photo-review-v1` 严格 JSON，`composition/lighting/color/subject/storytelling/technical` 六维 0–10 分及原因，另有 description/strengths/improvements/limitations；总分本地等权平均、两位 decimal half-up。无效响应整批失败，不保存原始 review；技术分只是预览可见判断，不代表原图测量。输入/配置匹配复用，force 新增历史；整批事务保存，失败停止后续请求，显式 resume 每次使用 job 的新 state-bound digest，不自动重试/修复/回退。
+- `photo-review-v2` 严格 JSON：顶层只有 `results`，按 manifest 顺序映射；`dimensions` 六维分数为 0–10 的 0.5 步长或 null，`review_status` 必须与空评分一致。改进建议含 `kind/action/rationale/tradeoff`，允许空优点和建议数组；拒绝 Markdown 围栏。仅六维均有分数时本地计算两位 decimal half-up 等权平均，其他情况总分为 null。无效响应整批失败，不保存原始 review；输入/配置匹配才复用，force 新增历史；失败停止后续请求，resume 使用新 state-bound digest，不自动重试/修复/回退。
 - 整个 Skill 自包含 prompt 与可选 `requirements-review.txt`，固定 SDK 1.0.13 / runtime 1.0.83；安装和 runtime 下载均需明确授权。默认现有本地 Copilot 登录 `mode="copilot-cli"` / `use_logged_in_user=True`，不需独立 token、不复制凭据、不自动登录；只排除 child 环境覆盖，独立 owned working/session state 不移动 credential home。限制/清理不是 OS sandbox、无日志、无远端保留或精确计费保证。
 - `review report <run-id> --output <absolute-new.html>` 只读相册，向新的绝对 HTML 路径不覆盖导出自包含报告；显示保存的预览/结构化结果、实际 active timing 和提供方已报告 token/credit，不访问原图/SDK/外部网络、不写相册。缺失用量为 unknown 而非零，重试覆盖不全须注明；Copilot credits 不是 Azure credits，不编造换算/价格或每图费用。多图批次指标共享，不除以图片数伪造逐图值，也不逐图累加重复计算。独立批次 1 才能归属该请求指标到单图，产品默认 4 不变。
 
@@ -90,3 +90,7 @@
 - [ ] 文件夹层级、动态规则、自动归类和网页写控件；现有手动/一次性 CLI 组织不扩展为这些功能。
 - [ ] 聚类、自动发现系列、以图搜图、自动重复合并/删除、自动选片及独立语音识别。第一阶段显式配对证据不授权这些操作。
 - [ ] 原图强制全量哈希/变化监控：现有 ingestion 基于 size/mtime 的快速检查可能漏掉保留属性的外部修改；不把读取保存预览描述为实时核验原图。
+
+## Photo review v2 contract
+
+已接入 `photo-review-v2.txt`，严格检查 `results`、manifest 顺序、六维 0.5 分步长、空评分与状态一致性，以及结构化改进建议。新相册使用 schema 12；schema 11 可继续读取，通过 `review upgrade --output <新文件>` 创建升级副本，保留源文件及 v1 历史。结构校验不等于视觉依据、输出语言及预览限制说明的语义验收。历史真实云端试验只适用于 v1，v2 本次验证使用合成数据与模拟 provider。

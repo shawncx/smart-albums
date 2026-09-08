@@ -99,7 +99,7 @@ Photo/preview updates use short per-photo transactions with identity rechecks, n
 
 ## Storage and validation boundary
 
-Only schema 11/application ID `0x53414C42` albums with 40 registered tables are supported: 35 ordinary, one external-content FTS5 virtual table and four explicitly registered shadows, excluding internal `sqlite_sequence`. The unchanged `virtual_folders` / `virtual_folder_photos` and six `image_embedding_*` tables remain separate from feature evidence and the three `ai_review_*` tables. Old v1–v10 databases are rejected unchanged; there is no migration, retired-table cleanup or old CLI compatibility. Existing user databases and backups remain untouched. Management exports use `album-snapshot-v2` with historical album/folder scope.
+Schema 11 and schema 12/application ID `0x53414C42` albums with 40 registered tables are supported: 35 ordinary, one external-content FTS5 virtual table and four explicitly registered shadows, excluding internal `sqlite_sequence`. The unchanged `virtual_folders` / `virtual_folder_photos` and six `image_embedding_*` tables remain separate from feature evidence and the three `ai_review_*` tables. Old v1–v10 databases are rejected unchanged; there is no migration, retired-table cleanup or old CLI compatibility. Existing user databases and backups remain untouched. Management exports use `album-snapshot-v2` with historical album/folder scope.
 
 Optional [review](review.md) is a fourth, independent capability requiring whole-task approval before any Copilot contact; ingestion never triggers it or changes its existing index invitation.
 

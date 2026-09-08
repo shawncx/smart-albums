@@ -53,7 +53,7 @@ invalid folders error and empty scopes stay empty. Optional confirmed date plans
 and selected-search additions are one-time conveniences, not automatic regrouping
 or live rules. All memberships travel inside SQLite backups/moves.
 
-New albums use schema 11 with 40 registered tables (35 ordinary, one external-content
+New albums use schema 12 with 40 registered tables (35 ordinary, one external-content
 FTS5 virtual table and four explicitly registered shadows; excluding internal `sqlite_sequence`), including
 `virtual_folders(folder_id, name, name_key, description, created_at, updated_at)` and
 `virtual_folder_photos(folder_id, photo_id, added_at)`. Management reports use

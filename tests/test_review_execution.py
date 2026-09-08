@@ -159,7 +159,7 @@ class ReviewExecutionTests(ReviewFixture):
 
     def test_invalid_last_review_rolls_back_entire_batch(self):
         def invalid(request, value, ordinal):
-            value["reviews"][-1]["scores"]["technical"]["score"] = True
+            value["results"][-1]["dimensions"]["technical"]["score"] = True
         plan = self.plan(self.ids[:4])
         failed = self.execute(plan, FakeReviewProvider(invalid))
         self.assertEqual(failed["status"], "failed")

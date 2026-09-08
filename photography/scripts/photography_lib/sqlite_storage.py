@@ -27,7 +27,7 @@ def now() -> str:
 
 
 APPLICATION_ID = 0x53414C42
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 SCHEMA = (
     """CREATE TABLE album_metadata (
@@ -238,12 +238,12 @@ class SQLiteStorage(ImageEmbeddingStorage, ImageFeatureStorage, VirtualFolderSto
     def _validate_format(self) -> None:
         application_id = self.db.execute("PRAGMA application_id").fetchone()[0]
         version = self.db.execute("PRAGMA user_version").fetchone()[0]
-        if 0 < version < SCHEMA_VERSION:
+        if 0 < version < 11:
             raise PhotographyError("SCHEMA_UNSUPPORTED",
                 f"Old database format v{version} is not supported. Create a new album; this file was not migrated.")
         if application_id != APPLICATION_ID:
             raise PhotographyError("ALBUM_FORMAT_INVALID", "This is not a supported Smart Albums file. Create a new album.")
-        if version != SCHEMA_VERSION:
+        if version not in (11, SCHEMA_VERSION):
             raise PhotographyError("SCHEMA_UNSUPPORTED", f"Unsupported album schema version: {version}.")
         tables = {row[0] for row in self.db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT GLOB 'sqlite_*'")}
@@ -279,7 +279,8 @@ class SQLiteStorage(ImageEmbeddingStorage, ImageFeatureStorage, VirtualFolderSto
         # format, rather than the feature mixin's earlier feature-only registry.
         expected = self._validate_registered_schema(FEATURE_ALL_TABLES, feature_schema_registry())
         triggers = {name: sql for (kind, name), sql in
-                    (*expected.items(), *review_schema_registry()[0].items()) if kind == "trigger"}
+                    (*expected.items(), *review_schema_registry(
+                        self.db.execute("PRAGMA user_version").fetchone()[0])[0].items()) if kind == "trigger"}
         for statement in IMAGE_EMBEDDING_SCHEMA:
             match = re.match(r"CREATE TRIGGER IF NOT EXISTS (\w+)", statement)
             if match:
@@ -374,6 +375,56 @@ class SQLiteStorage(ImageEmbeddingStorage, ImageFeatureStorage, VirtualFolderSto
                 raise PhotographyError("BACKUP_FAILED", f"Could not back up album file: {exc}") from exc
             raise
         finally:
+            if identity is not None:
+                _remove_owned_file(temporary, identity)
+
+    def upgrade_review(self, output: Path | str) -> dict:
+        """Publish a validated v12 copy; never migrate the source album on open."""
+        destination_path = _new_destination(output)
+        if self.db.in_transaction:
+            raise PhotographyError("STORAGE_BUSY", "Finish the active transaction before upgrading a copy.")
+        temporary = destination_path.parent / (".sa-" + uuid4().hex + ".tmp")
+        identity, upgraded = None, None
+        try:
+            identity = _exclusive_file(temporary)
+            with closing(sqlite3.connect(temporary.as_uri() + "?mode=rw", uri=True)) as destination:
+                self.db.backup(destination)
+            upgraded = type(self)._connect(temporary, writable=True)
+            with upgraded.read_snapshot():
+                upgraded._validate_format()
+            previous = upgraded.db.execute("PRAGMA user_version").fetchone()[0]
+            if previous == 11:
+                with upgraded.transaction():
+                    # Rebuild only the result table in the unpublished copy.
+                    # Historical payloads, profiles, IDs and approvals stay exact.
+                    for (kind, name) in review_schema_registry(11)[0]:
+                        if kind == "trigger":
+                            upgraded.db.execute(f'DROP TRIGGER "{name}"')
+                    upgraded.db.execute("ALTER TABLE ai_review_results RENAME TO ai_review_results_v1")
+                    upgraded.db.execute(next(sql for sql in REVIEW_SCHEMA
+                                             if sql.startswith("CREATE TABLE ai_review_results")))
+                    upgraded.db.execute("INSERT INTO ai_review_results SELECT * FROM ai_review_results_v1")
+                    if upgraded.db.execute("SELECT * FROM ai_review_results_v1 EXCEPT SELECT * FROM ai_review_results").fetchone():
+                        raise PhotographyError("REVIEW_UPGRADE_FAILED", "Review history did not copy exactly.")
+                    upgraded.db.execute("DROP TABLE ai_review_results_v1")
+                    for sql in REVIEW_SCHEMA:
+                        if not sql.startswith("CREATE TABLE"):
+                            upgraded.db.execute(sql)
+                    upgraded.db.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+                    upgraded._validate_format()
+            album = upgraded.album()
+            upgraded.close()
+            upgraded = None
+            _publish_new(temporary, destination_path)
+            return {"album": {**album, "name": destination_path.stem, "database_path": str(destination_path)},
+                    "output": str(destination_path), "previous_schema_version": previous,
+                    "schema_version": SCHEMA_VERSION, "source_unchanged": True,
+                    "provider_calls_this_operation": 0}
+        except (OSError, sqlite3.Error) as exc:
+            raise PhotographyError("REVIEW_UPGRADE_FAILED", "Could not publish the upgraded album copy.") from exc
+        finally:
+            if upgraded is not None:
+                upgraded.close()
             if identity is not None:
                 _remove_owned_file(temporary, identity)
 

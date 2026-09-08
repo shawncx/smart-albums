@@ -1,171 +1,174 @@
-"""Versioned, searchable photo reviews; unvalidated model text is never a result."""
+"""Strict v2 provider contract, with separate validation of saved v1 history."""
 from __future__ import annotations
 
 from copy import deepcopy
-from decimal import Decimal, ROUND_HALF_UP
 import hashlib
 import json
-import math
 from pathlib import Path
 import re
 
 from .config import PhotographyError
 from .fingerprints import fingerprint
+from . import review_schema_v1 as legacy
 
+DIMENSIONS = legacy.DIMENSIONS
+SCHEMA_VERSION = RUBRIC_VERSION = "photo-review-v2"
+SDK_VERSION, RUNTIME_VERSION, PROVIDER_ID = legacy.SDK_VERSION, legacy.RUNTIME_VERSION, legacy.PROVIDER_ID
+MAX_RESPONSE_BYTES, TEXT_LIMIT, LIST_LIMIT = legacy.MAX_RESPONSE_BYTES, legacy.TEXT_LIMIT, legacy.LIST_LIMIT
+REVIEW_FIELDS = ("review_status", "description", "dimensions", "strengths", "improvements", "limitations")
+PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "photo-review-v2.txt"
 
-DIMENSIONS = ("composition", "lighting", "color", "subject", "storytelling", "technical")
-SCHEMA_VERSION = "photo-review-v1"
-RUBRIC_VERSION = "photo-review-v1"
-SDK_VERSION = "1.0.13"
-RUNTIME_VERSION = "1.0.83"
-PROVIDER_ID = "github-copilot"
-MAX_RESPONSE_BYTES = 1024 * 1024
-TEXT_LIMIT = 4000
-LIST_LIMIT = 8
-REVIEW_FIELDS = ("description", "strengths", "improvements", "scores", "limitations")
-PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "photo-review-v1.txt"
-
-_TEXT_SCHEMA = {"type": "string", "minLength": 1, "maxLength": TEXT_LIMIT}
-_LIST_SCHEMA = {"type": "array", "minItems": 1, "maxItems": LIST_LIMIT, "items": _TEXT_SCHEMA}
+_TEXT_SCHEMA = {"type": "string", "minLength": 1, "maxLength": TEXT_LIMIT, "pattern": r"\S"}
+_NUMBER_SCHEMA = {"type": "number", "minimum": 0, "maximum": 10, "multipleOf": 0.5}
 _SCORE_SCHEMA = {
     "type": "object", "additionalProperties": False, "required": ["score", "reason"],
-    "properties": {"score": {"type": "number", "minimum": 0, "maximum": 10},
-                   "reason": _TEXT_SCHEMA},
+    "properties": {"score": {"anyOf": [_NUMBER_SCHEMA, {"type": "null"}]}, "reason": _TEXT_SCHEMA},
 }
-_REVIEW_PROPERTIES = {
-    "image_id": {"type": "string", "pattern": "^image_[1-9][0-9]*$"},
-    "description": _TEXT_SCHEMA,
-    "strengths": _LIST_SCHEMA,
-    "improvements": _LIST_SCHEMA,
-    "limitations": _LIST_SCHEMA,
-    "scores": {"type": "object", "additionalProperties": False, "required": list(DIMENSIONS),
-               "properties": {key: _SCORE_SCHEMA for key in DIMENSIONS}},
+_IMPROVEMENT_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "required": ["kind", "action", "rationale", "tradeoff"],
+    "properties": {"kind": {"enum": ["edit", "reshoot"]}, "action": _TEXT_SCHEMA,
+                   "rationale": _TEXT_SCHEMA, "tradeoff": {"anyOf": [_TEXT_SCHEMA, {"type": "null"}]}},
+}
+
+
+def _score_types(kind):
+    return {key: {"properties": {"score": {"type": kind}}} for key in DIMENSIONS}
+
+
+_REVIEW_SCHEMA = {
+    "type": "object", "additionalProperties": False, "required": ["image_id", *REVIEW_FIELDS],
+    "properties": {
+        "image_id": {"type": "string"},
+        "review_status": {"enum": ["reviewed", "partial", "unreviewable"]},
+        "description": _TEXT_SCHEMA,
+        "dimensions": {"type": "object", "additionalProperties": False, "required": list(DIMENSIONS),
+                       "properties": {key: _SCORE_SCHEMA for key in DIMENSIONS}},
+        "strengths": {"type": "array", "maxItems": 3, "items": _TEXT_SCHEMA},
+        "improvements": {"type": "array", "maxItems": 3, "items": _IMPROVEMENT_SCHEMA},
+        "limitations": {"type": "array", "minItems": 1, "items": _TEXT_SCHEMA},
+    },
+    "allOf": [
+        {"if": {"properties": {"review_status": {"const": "reviewed"}}},
+         "then": {"properties": {"dimensions": {"properties": _score_types("number")}}}},
+        {"if": {"properties": {"review_status": {"const": "unreviewable"}}},
+         "then": {"properties": {"dimensions": {"properties": _score_types("null")}}}},
+        {"if": {"properties": {"review_status": {"const": "partial"}}},
+         "then": {"properties": {"dimensions": {"allOf": [
+             {"anyOf": [{"properties": {key: value}} for key, value in _score_types(kind).items()]}
+             for kind in ("number", "null")
+         ]}}}},
+    ],
 }
 RESPONSE_SCHEMA = {
     "$schema": "https://json-schema.org/draft/2020-12/schema",
-    "type": "object", "additionalProperties": False,
-    "required": ["schema_version", "reviews"],
-    "properties": {
-        "schema_version": {"const": SCHEMA_VERSION},
-        "reviews": {"type": "array", "minItems": 1,
-                    "items": {"type": "object", "additionalProperties": False,
-                              "required": ["image_id", *REVIEW_FIELDS],
-                              "properties": _REVIEW_PROPERTIES}},
-    },
+    "type": "object", "additionalProperties": False, "required": ["results"],
+    "properties": {"results": {"type": "array", "items": _REVIEW_SCHEMA}},
 }
-
-
-def _invalid(message, *, details=None):
-    raise PhotographyError("REVIEW_RESPONSE_INVALID", message, details=details)
-
-
-def _keys(value, expected):
-    if type(value) is not dict or set(value) != set(expected):
-        _invalid("Review object has missing, unexpected, or invalid fields.")
-
-
-def _text(value):
-    if not isinstance(value, str) or not value.strip() or len(value) > TEXT_LIMIT:
-        _invalid("Review text must be nonempty and within the field limit.")
-    try:
-        value.encode("utf-8")
-    except UnicodeError:
-        _invalid("Review text is not valid UTF-8.")
-    return value
-
-
-def _number(value):
-    if (type(value) not in (int, float) or not 0 <= value <= 10
-            or not math.isfinite(value)):
-        _invalid("Review scores must be finite numbers from 0 to 10, not booleans.")
-    return value
+_invalid, _keys, _text, _number = legacy._invalid, legacy._keys, legacy._text, legacy._number
 
 
 def _review_fields(value):
     _text(value["description"])
-    for key in ("strengths", "improvements", "limitations"):
-        items = value[key]
-        if type(items) is not list or not 1 <= len(items) <= LIST_LIMIT:
-            _invalid("Review lists must contain between one and eight text entries.")
-        for item in items:
-            _text(item)
-    _keys(value["scores"], DIMENSIONS)
-    for item in value["scores"].values():
-        _keys(item, ("score", "reason"))
-        _number(item["score"])
-        _text(item["reason"])
+    for key in ("strengths", "limitations"):
+        entries = value[key]
+        if type(entries) is not list or (key == "strengths" and len(entries) > 3) or (
+                key == "limitations" and not entries):
+            _invalid("Strengths require 0–3 entries; limitations must be nonempty.")
+        for entry in entries:
+            _text(entry)
+    entries = value["improvements"]
+    if type(entries) is not list or len(entries) > 3:
+        _invalid("Improvements must contain 0–3 structured suggestions.")
+    for entry in entries:
+        _keys(entry, ("kind", "action", "rationale", "tradeoff"))
+        if entry["kind"] not in ("edit", "reshoot"):
+            _invalid("Improvement kind must be edit or reshoot.")
+        _text(entry["action"])
+        _text(entry["rationale"])
+        if entry["tradeoff"] is not None:
+            _text(entry["tradeoff"])
+    _keys(value["dimensions"], DIMENSIONS)
+    numeric = 0
+    for entry in value["dimensions"].values():
+        _keys(entry, ("score", "reason"))
+        _text(entry["reason"])
+        if entry["score"] is not None:
+            score = _number(entry["score"])
+            if score * 2 != int(score * 2):
+                _invalid("Review scores must use increments of 0.5.")
+            numeric += 1
+    status = "reviewed" if numeric == 6 else "partial" if numeric else "unreviewable"
+    if value["review_status"] != status:
+        _invalid("Review status does not match the six numeric/null dimension scores.")
+
+
+def dimension_scores(payload):
+    return payload["scores" if payload["schema_version"] == legacy.SCHEMA_VERSION else "dimensions"]
 
 
 def overall_score(scores):
-    values = [Decimal(str(_number(scores[key]["score"]))) for key in DIMENSIONS]
-    return float((sum(values) / Decimal(len(values))).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    """Application-only mean; incomplete evidence never becomes a numeric total."""
+    if any(scores[key]["score"] is None for key in DIMENSIONS):
+        return None
+    return legacy.overall_score(scores)
 
 
 def validate_payload(value):
-    """Validate the canonical saved payload, including its application-computed mean."""
+    if type(value) is dict and value.get("schema_version") == legacy.SCHEMA_VERSION:
+        return legacy.validate_payload(value)
     _keys(value, ("schema_version", "overall_score", *REVIEW_FIELDS))
     if value["schema_version"] != SCHEMA_VERSION:
         _invalid("Unsupported review payload schema.")
     _review_fields(value)
-    if _number(value["overall_score"]) != overall_score(value["scores"]):
-        _invalid("Saved overall score does not match the six dimension scores.")
+    expected = overall_score(value["dimensions"])
+    actual = value["overall_score"]
+    if (expected is None and actual is not None) or (
+            expected is not None and _number(actual) != expected):
+        _invalid("Saved overall score does not match the complete six-dimension mean.")
     return deepcopy(value)
 
 
-def _unique_object(pairs):
-    result = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("Duplicate JSON key.")
-        result[key] = value
-    return result
-
-
-def _nonfinite(_value):
-    raise ValueError("Non-finite JSON number.")
-
-
 def strict_json(text):
-    wrapped = False
     try:
         if not isinstance(text, str) or len(text.encode("utf-8")) > MAX_RESPONSE_BYTES:
             _invalid("Review response is missing or exceeds the size limit.")
-        text = text.strip()
-        lines = text.splitlines()
-        if len(lines) >= 3 and lines[0].casefold() in ("```json", "```") and lines[-1] == "```":
-            text = "\n".join(lines[1:-1])
-            wrapped = True
-        return json.loads(text, object_pairs_hook=_unique_object, parse_constant=_nonfinite)
+        return json.loads(text, object_pairs_hook=legacy._unique_object, parse_constant=legacy._nonfinite)
     except json.JSONDecodeError as exc:
-        _invalid("Expected one strict JSON review object; prose and malformed JSON are not accepted.",
-                 details={"json_wrapper_removed": wrapped, "line": exc.lineno, "column": exc.colno})
+        _invalid("Expected one strict JSON object; Markdown fences and surrounding prose are not accepted.",
+                 details={"line": exc.lineno, "column": exc.colno})
     except (ValueError, UnicodeError, RecursionError):
-        _invalid("Expected one strict JSON review object; prose and malformed JSON are not accepted.")
+        _invalid("Expected one strict JSON object without duplicate keys or non-finite numbers.")
+
+
+def _image_ids(ids):
+    # IDs are opaque strings. Their contents are never filenames or evidence.
+    if (not isinstance(ids, (list, tuple)) or any(not isinstance(key, str) for key in ids)
+            or len(set(ids)) != len(ids)):
+        raise PhotographyError("INVALID_ARGUMENT", "Expected distinct opaque review image IDs.")
+    try:
+        json.dumps(ids, ensure_ascii=False).encode("utf-8")
+    except UnicodeError:
+        raise PhotographyError("INVALID_ARGUMENT", "Review image IDs must be valid UTF-8.") from None
 
 
 def parse_response(text, expected_ids):
-    if (not isinstance(expected_ids, (list, tuple)) or not expected_ids
-            or any(not isinstance(key, str) or not re.fullmatch(r"image_[1-9][0-9]*", key)
-                   for key in expected_ids) or len(set(expected_ids)) != len(expected_ids)):
-        raise PhotographyError("INVALID_ARGUMENT", "Expected distinct opaque review image IDs.")
+    _image_ids(expected_ids)
     envelope = strict_json(text)
-    _keys(envelope, ("schema_version", "reviews"))
-    if envelope["schema_version"] != SCHEMA_VERSION:
-        _invalid("Unsupported review response schema.")
-    reviews = envelope["reviews"]
+    _keys(envelope, ("results",))
+    reviews = envelope["results"]
     if type(reviews) is not list or len(reviews) != len(expected_ids):
-        _invalid("The response must contain exactly one review for every submitted image.")
+        _invalid("The response must contain exactly one result per manifest entry.")
     results = {}
-    for review in reviews:
+    for review, key in zip(reviews, expected_ids):
         _keys(review, ("image_id", *REVIEW_FIELDS))
-        key = review["image_id"]
-        if not isinstance(key, str) or key not in expected_ids or key in results:
-            _invalid("The response contains an unknown or repeated image ID.")
+        if review["image_id"] != key:
+            _invalid("Result image IDs must match the manifest exactly, in manifest order.")
         _review_fields(review)
         payload = {name: deepcopy(review[name]) for name in REVIEW_FIELDS}
-        payload.update(schema_version=SCHEMA_VERSION, overall_score=overall_score(payload["scores"]))
+        payload.update(schema_version=SCHEMA_VERSION, overall_score=overall_score(payload["dimensions"]))
         results[key] = validate_payload(payload)
-    return {key: results[key] for key in expected_ids}
+    return results
 
 
 def review_profile(model, language="zh-CN"):
@@ -192,54 +195,40 @@ def review_profile(model, language="zh-CN"):
 
 
 def validate_profile(profile):
-    expected = {
-        "version", "provider", "model", "sdk_version", "runtime_version", "rubric_version",
-        "output_schema_version", "language", "input_scope", "auth_policy", "dimensions",
-        "weights", "rounding", "prompt_text", "prompt_hash", "response_schema_hash",
-    }
-    valid = (type(profile) is dict and set(profile) == expected)
-    if valid:
-        valid = (
-            profile["version"] == "ai-review-profile-v1" and profile["provider"] == PROVIDER_ID
-            and isinstance(profile["model"], str)
-            and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}", profile["model"])
-            and profile["model"].casefold() not in ("auto", "default")
-            and profile["sdk_version"] == SDK_VERSION and profile["runtime_version"] == RUNTIME_VERSION
-            and profile["rubric_version"] == RUBRIC_VERSION and profile["output_schema_version"] == SCHEMA_VERSION
-            and profile["language"] in ("zh-CN", "en") and profile["input_scope"] == "stored_thumbnail"
-            and profile["auth_policy"] == "current-copilot-login"
-            and profile["dimensions"] == list(DIMENSIONS)
-            and type(profile["weights"]) is dict and set(profile["weights"]) == set(DIMENSIONS)
-            and all(type(value) is int and value == 1 for value in profile["weights"].values())
-            and profile["rounding"] == "decimal-half-up-2"
-            and isinstance(profile["prompt_text"], str) and 1 <= len(profile["prompt_text"]) <= 16000
-            and profile["response_schema_hash"] == fingerprint(RESPONSE_SCHEMA)
-        )
-    if valid:
-        try:
-            valid = profile["prompt_hash"] == hashlib.sha256(profile["prompt_text"].encode("utf-8")).hexdigest()
-        except UnicodeError:
-            valid = False
-    if not valid:
+    if type(profile) is dict and profile.get("output_schema_version") == legacy.SCHEMA_VERSION:
+        return legacy.validate_profile(profile)
+    if (type(profile) is not dict or profile.get("rubric_version") != RUBRIC_VERSION
+            or profile.get("output_schema_version") != SCHEMA_VERSION
+            or profile.get("response_schema_hash") != fingerprint(RESPONSE_SCHEMA)):
         raise PhotographyError("REVIEW_PROFILE_INVALID", "Review configuration failed its version or integrity check.")
+    # Transport/auth/profile shape is unchanged; substitute only versioned
+    # identities to reuse the frozen integrity rules without mutating history.
+    probe = {**profile, "rubric_version": legacy.RUBRIC_VERSION,
+             "output_schema_version": legacy.SCHEMA_VERSION,
+             "response_schema_hash": fingerprint(legacy.RESPONSE_SCHEMA)}
+    legacy.validate_profile(probe)
     return deepcopy(profile)
 
 
 def build_prompt(profile, image_ids):
     profile = validate_profile(profile)
-    if (not isinstance(image_ids, (list, tuple)) or not image_ids
-            or any(not isinstance(key, str) or not re.fullmatch(r"image_[1-9][0-9]*", key) for key in image_ids)
-            or len(set(image_ids)) != len(image_ids)):
-        raise PhotographyError("INVALID_ARGUMENT", "Expected distinct opaque review image IDs.")
+    if profile["output_schema_version"] != SCHEMA_VERSION:
+        raise PhotographyError("REVIEW_PROFILE_CHANGED", "Create a new plan using the current review rubric.")
+    _image_ids(image_ids)
     schema = deepcopy(RESPONSE_SCHEMA)
-    reviews = schema["properties"]["reviews"]
-    reviews.update(minItems=len(image_ids), maxItems=len(image_ids))
-    reviews["items"]["properties"]["image_id"]["enum"] = list(image_ids)
+    results = schema["properties"]["results"]
+    schema["$defs"] = {"review": results.pop("items")}
+    results["items"] = {"$ref": "#/$defs/review"}
+    results.update(minItems=len(image_ids), maxItems=len(image_ids))
+    # Bind each position as well as membership; reordered results are invalid.
+    if image_ids:
+        results["prefixItems"] = [
+            {"allOf": [{"$ref": "#/$defs/review"}, {"properties": {"image_id": {"const": key}}}]}
+            for key in image_ids
+        ]
     language = "Simplified Chinese" if profile["language"] == "zh-CN" else "English"
-    manifest = [{"image_id": key, "attachment_position": i + 1} for i, key in enumerate(image_ids)]
-    return (
-        profile["prompt_text"] + "\nWrite all natural-language fields in " + language + ".\n"
-        "Image manifest (attachment order): " + json.dumps(manifest) + "\n"
-        "Return only JSON conforming to this schema. Do not return an overall score; the application computes it.\n"
-        + json.dumps(schema, ensure_ascii=False, sort_keys=True)
-    )
+    manifest = [{"image_id": key, "attachment_index": i + 1} for i, key in enumerate(image_ids)]
+    return (profile["prompt_text"] + "\nRequest input:\n" + json.dumps({
+        "output_language": language, "manifest": manifest,
+    }, ensure_ascii=False) + "\nReturn only JSON conforming to this schema:\n"
+        + json.dumps(schema, ensure_ascii=False, sort_keys=True))

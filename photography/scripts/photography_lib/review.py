@@ -177,6 +177,11 @@ def job(store, run_id):
             "remaining": sum(len(batch["items"]) for batch in batches if batch["status"] != "completed"),
             "completed_batches": sum(batch["status"] == "completed" for batch in batches),
             "total_batches": len(batches),
+            "review_status_counts": {
+                status: sum(record["payload"].get("review_status", "reviewed") == status
+                            for record in (*cached, *records))
+                for status in ("reviewed", "partial", "unreviewable")
+            },
         }
         retry = None
         if run["status"] not in ("planned", "completed"):

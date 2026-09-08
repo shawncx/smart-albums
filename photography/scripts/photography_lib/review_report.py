@@ -9,7 +9,7 @@ from .config import PhotographyError
 from .exports import prepare_export, write_export
 from .management_report import _preview
 from .review import job
-from .review_schema import DIMENSIONS
+from .review_schema import DIMENSIONS, dimension_scores
 from .source_paths import photo_filename
 
 
@@ -19,6 +19,19 @@ def _text(value):
 
 def _list(values):
     return "<ul>" + "".join("<li>" + _text(value) + "</li>" for value in values) + "</ul>"
+
+
+def _improvements(payload):
+    if payload["schema_version"] == "photo-review-v1":
+        return _list(payload["improvements"])
+    entries = []
+    for item in payload["improvements"]:
+        entry = ("<li><strong>" + _text(item["kind"]) + ": " + _text(item["action"])
+                 + "</strong><p>" + _text(item["rationale"]) + "</p>")
+        if item["tradeoff"] is not None:
+            entry += "<p>Trade-off: " + _text(item["tradeoff"]) + "</p>"
+        entries.append(entry + "</li>")
+    return "<ul>" + "".join(entries) + "</ul>"
 
 
 def _metric(metadata, key, suffix=""):
@@ -101,16 +114,24 @@ def review_report(run_id, output, *, store, config):
                     body += _usage(batch, batch["metadata"])
             else:
                 payload = record["payload"]
-                body += '<p class="overall">' + _text(payload["overall_score"]) + '<small> / 10</small></p>'
+                body += '<p>Review status: ' + _text(payload.get("review_status", "reviewed")) + "</p>"
+                if payload["overall_score"] is not None:
+                    body += ('<p class="overall">' + _text(payload["overall_score"])
+                             + '<small> / 10 · Application mean</small></p>')
+                else:
+                    body += '<p class="notice">Overall score unavailable: incomplete dimension evidence.</p>'
                 body += '<p class="description">' + _text(payload["description"]) + "</p><div class=\"scores\">"
                 for dimension in DIMENSIONS:
-                    score = payload["scores"][dimension]
-                    body += ('<div class="dimension"><strong>' + _text(dimension.title()) + "</strong>"
-                             '<span>' + _text(score["score"]) + ' / 10</span>'
-                             '<meter min="0" max="10" value="' + _text(score["score"]) + '"></meter>'
-                             "<p>" + _text(score["reason"]) + "</p></div>")
+                    score = dimension_scores(payload)[dimension]
+                    body += '<div class="dimension"><strong>' + _text(dimension.title()) + "</strong>"
+                    if score["score"] is None:
+                        body += '<span>Not assessable</span>'
+                    else:
+                        body += ('<span>' + _text(score["score"]) + ' / 10</span>'
+                                 '<meter min="0" max="10" value="' + _text(score["score"]) + '"></meter>')
+                    body += "<p>" + _text(score["reason"]) + "</p></div>"
                 body += "</div><h3>Strengths</h3>" + _list(payload["strengths"])
-                body += "<h3>Improvements</h3>" + _list(payload["improvements"])
+                body += "<h3>Improvements</h3>" + _improvements(payload)
                 body += '<div class="notice"><h3>Limitations</h3>' + _list(payload["limitations"]) + "</div>"
                 batch = batches.get(record["batch_id"])
                 if batch is None:
@@ -137,7 +158,9 @@ def review_report(run_id, output, *, store, config):
             "Shared batch usage is never counted once per image. Retry totals may be incomplete. "
             "Active time excludes user confirmation waits and report generation.</p>"
             "<p>Each score is subjective, based on the stored preview. The overall score is the equal-weight "
-            "six-dimension mean. This local snapshot makes no network requests and does not change the album.</p>"
+            "six-dimension mean computed by the application only when all six scores are numeric. "
+            "Structural validation does not verify visual evidence, language or completeness of preview limitations. "
+            "This local snapshot makes no network requests and does not change the album.</p>"
             "<details><summary>Task provenance</summary><pre>" + _text(json.dumps({
                 "run_id": run_id, "album_id": saved["album_id"], "created_at": saved["created_at"],
                 "profile_id": saved["profile_id"], "rubric_version": saved["profile"]["rubric_version"],

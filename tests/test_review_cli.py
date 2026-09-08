@@ -51,7 +51,7 @@ class ReviewCLITests(ReviewFixture):
     def test_execute_and_failure_exit_codes_and_fresh_retry(self):
         _, plan = self.cli("plan", "--photo-id", self.ids[0], "--model", "vision-test")
         def malformed(request, value, ordinal):
-            value["reviews"][0]["scores"]["technical"]["score"] = "wrong"
+            value["results"][0]["dimensions"]["technical"]["score"] = "wrong"
         with patch("photography_lib.review._provider", return_value=FakeReviewProvider(malformed)):
             code, failed = self.cli("execute", plan["run_id"], "--confirm", plan["digest"])
         self.assertEqual(code, 1, failed)
@@ -62,7 +62,7 @@ class ReviewCLITests(ReviewFixture):
         self.assertEqual(complete["status"], "completed")
         result = self.cli("result", self.ids[0])[1]["result"]
         self.assertIsInstance(result["payload"], dict)
-        self.assertEqual(result["payload"]["scores"]["composition"]["score"], 7)
+        self.assertEqual(result["payload"]["dimensions"]["composition"]["score"], 7)
 
     def test_optional_sdk_is_not_imported_for_local_surfaces(self):
         original_import = builtins.__import__
@@ -97,5 +97,5 @@ class ReviewCLITests(ReviewFixture):
             cwd=elsewhere, capture_output=True, text=True, encoding="utf-8", check=False)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         value = json.loads(completed.stdout)
-        self.assertEqual(value["rubric_version"], "photo-review-v1")
+        self.assertEqual(value["rubric_version"], "photo-review-v2")
         self.assertIn("downsampled JPEG", value["prompt"])

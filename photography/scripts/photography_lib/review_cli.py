@@ -8,6 +8,8 @@ def add_commands(commands):
     root = commands.add_parser("review", help="Explicit cloud review of selected saved photo previews.")
     actions = root.add_subparsers(dest="review_command", required=True)
     actions.add_parser("rubric", help="Show the bundled scoring rubric without contacting Copilot.")
+    upgrade = actions.add_parser("upgrade", help="Create a schema-12 album copy for v2 reviews; preserve the source.")
+    upgrade.add_argument("--output", required=True, help="Unused absolute album file destination.")
     models = actions.add_parser("models", help="Contact Copilot to list models only after explicit confirmation.")
     models.add_argument("--confirm-provider-access", action="store_true")
     plan = actions.add_parser("plan", help="Freeze a photo selection locally; no Copilot calls.")
@@ -41,12 +43,17 @@ def add_commands(commands):
 def command(args, store, config):
     from . import review
     action = args.review_command
+    if action == "upgrade":
+        if not Path(args.output).is_absolute():
+            raise PhotographyError("INVALID_ARGUMENT", "Album upgrade requires an absolute destination.")
+        return store.upgrade_review(args.output)
     if action == "rubric":
         from .review_schema import DIMENSIONS, RESPONSE_SCHEMA, review_profile
         profile = review_profile("explicit-model-required")
         return {"rubric_version": profile["rubric_version"], "dimensions": list(DIMENSIONS),
                 "prompt": profile["prompt_text"], "response_schema": RESPONSE_SCHEMA,
-                "overall_score": "Equal-weight mean, decimal half-up to two places.",
+                "overall_score": "Application-only equal-weight mean, decimal half-up to two places; null if any dimension is null.",
+                "validation_scope": "Structural contract; visual evidence, output language and preview-limit wording require semantic review.",
                 "provider_calls_this_operation": 0}
     if action == "models":
         if not args.confirm_provider_access:

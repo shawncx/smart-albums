@@ -37,7 +37,7 @@ aliases and internal album/library options are removed, not compatibility entry 
 
 `create` initializes a private temporary file and publishes it without replacing
 an existing destination, including a file that appears during creation. Backups
-use the same no-overwrite publication boundary. The new album has schema 11,
+use the same no-overwrite publication boundary. The new album has schema 12,
 application ID `0x53414C42`, 40 registered tables and one album UUID: 35 ordinary,
 one external-content FTS5 virtual table and four explicitly registered shadows
 (excluding internal `sqlite_sequence`). `open` uses a read-only

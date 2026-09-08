@@ -25,7 +25,7 @@ class ReviewReportTests(ReviewFixture):
 
     def test_single_photo_metrics_and_safe_structured_report(self):
         def hostile_text(request, value, ordinal):
-            value["reviews"][0]["description"] = '<script>alert("untrusted")</script>'
+            value["results"][0]["description"] = '<script>alert("untrusted")</script>'
         plan = self.plan(self.ids[:2], batch_size=1)
         done = self.execute(plan, MeteredProvider(hostile_text))
         self.assertGreater(done["elapsed_seconds"], 0)
@@ -89,7 +89,7 @@ class ReviewReportTests(ReviewFixture):
 
     def test_invalid_review_can_still_show_observed_failed_attempt_usage(self):
         def invalid(request, value, ordinal):
-            value["reviews"][0]["scores"]["composition"]["score"] = False
+            value["results"][0]["dimensions"]["composition"]["score"] = False
         plan = self.plan(batch_size=1)
         failed = self.execute(plan, MeteredProvider(invalid))
         self.assertEqual(failed["status"], "failed")
@@ -100,7 +100,7 @@ class ReviewReportTests(ReviewFixture):
 
     def test_retry_keeps_previous_failed_token_usage_in_history_and_total(self):
         def invalid(request, value, ordinal):
-            value["reviews"][0]["scores"]["composition"]["score"] = False
+            value["results"][0]["dimensions"]["composition"]["score"] = False
         plan = self.plan(batch_size=1)
         failed = self.execute(plan, MeteredProvider(invalid))
         completed = review.execute_plan(plan["run_id"], store=self.store, resume=True,

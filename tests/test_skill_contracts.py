@@ -444,7 +444,7 @@ class SkillContractTests(unittest.TestCase):
             self.assertFalse((installed.parent / "docs").exists())
             self.assertFalse((installed.parent / ".venv-features").exists())
             self.assertFalse((installed.parent / ".venv-review").exists())
-            self.assertTrue((installed / "prompts" / "photo-review-v1.txt").is_file())
+            self.assertTrue((installed / "prompts" / "photo-review-v2.txt").is_file())
             self.assertEqual((installed / "requirements-review.txt").read_text(encoding="utf-8"),
                              (ROOT / "photography" / "requirements-review.txt").read_text(encoding="utf-8"))
             self.assert_local_markdown_links(sorted(installed.rglob("*.md")), bundle=installed.resolve())
@@ -473,7 +473,7 @@ sys.path.insert(0, str(entrypoint.parent))
 from photography_lib.cli import parser
 from photography_lib.feature_models import worker_python
 from photography_lib.review_schema import PROMPT_PATH, review_profile
-assert PROMPT_PATH == entrypoint.parent.parent / "prompts" / "photo-review-v1.txt"
+assert PROMPT_PATH == entrypoint.parent.parent / "prompts" / "photo-review-v2.txt"
 assert review_profile("explicit-test-vision-model")["prompt_text"] == PROMPT_PATH.read_text(encoding="utf-8")
 arguments = parser().parse_args([
     "--database", str(Path.cwd() / "unopened.sqlite"), "index", "setup", "--component", "ocr",
@@ -549,14 +549,14 @@ runpy.run_path(str(entrypoint), run_name="__main__")
                        "do not read its HTML image payloads"):
             self.assertIn(phrase, section)
 
-    def test_current_guides_describe_actual_schema_eleven_without_migration(self):
+    def test_current_guides_describe_current_schema_without_migration_on_open(self):
         with closing(sqlite3.connect(":memory:")) as database:
             for statement in (*SCHEMA, *IMAGE_EMBEDDING_SCHEMA, *VIRTUAL_FOLDER_SCHEMA,
                               *IMAGE_FEATURE_SCHEMA, *REVIEW_SCHEMA):
                 database.execute(statement)
             tables = {row[0] for row in database.execute(
                 "SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%'")}
-        self.assertEqual(SCHEMA_VERSION, 11)
+        self.assertEqual(SCHEMA_VERSION, 12)
         self.assertEqual(len(IMAGE_EMBEDDING_TABLES), 6)
         self.assertEqual(set(REVIEW_TABLES), {"ai_review_results", "ai_review_runs", "ai_review_batches"})
         self.assertEqual(len(tables), 13 + len(FEATURE_ALL_TABLES) + len(REVIEW_TABLES))
@@ -682,8 +682,8 @@ runpy.run_path(str(entrypoint), run_name="__main__")
         for example in examples:
             with self.subTest(example=example):
                 response = json.loads(example)
-                self.assertEqual(response["schema_version"], REVIEW_SCHEMA_VERSION)
-                self.assertEqual([item["image_id"] for item in response["reviews"]], ["image_1"])
+                self.assertEqual(set(response), {"results"})
+                self.assertEqual([item["image_id"] for item in response["results"]], ["image_1"])
                 parsed = parse_response(example, ["image_1"])
                 self.assertEqual(parsed["image_1"]["overall_score"], 6.17)
                 self.assertNotIn("image_id", parsed["image_1"])
@@ -693,7 +693,7 @@ runpy.run_path(str(entrypoint), run_name="__main__")
         values = {"absolute-json-file": str(ROOT / "contract-only-photo-ids.json"),
                   "absolute-new.html": str(ROOT / "contract-only-new.html"),
                   "photo-id": "photo-id", "model-id": "explicit-vision-model"}
-        actions = {"rubric", "models", "plan", "execute", "job", "resume", "result", "history", "report"}
+        actions = {"rubric", "models", "plan", "execute", "job", "resume", "result", "history", "report", "upgrade"}
         for document in REVIEW_GUIDES:
             text = document.read_text(encoding="utf-8")
             commands = [line for block in re.findall(r"```text\n(.*?)```", text, re.DOTALL)

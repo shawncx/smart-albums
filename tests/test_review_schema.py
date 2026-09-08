@@ -13,11 +13,15 @@ from photography_lib.review_schema import (
 
 
 def response(image_ids=("image_1",), score=7):
-    return {"schema_version": SCHEMA_VERSION, "reviews": [
-        {"image_id": key, "description": "A balanced image.", "strengths": ["Clear subject."],
-         "improvements": ["Simplify the background."], "limitations": ["Preview only; original detail is unknown."],
-         "scores": {name: {"score": score, "reason": "Supported by visible preview evidence."}
-                    for name in DIMENSIONS}}
+    return {"results": [
+        {"image_id": key, "review_status": "reviewed", "description": "A balanced image.",
+         "strengths": ["Clear subject."], "improvements": [
+             {"kind": "edit", "action": "Crop the bright edge.",
+              "rationale": "Removing the bright edge reduces distraction from the subject.", "tradeoff": None}],
+         "limitations": ["The downsampled JPEG preview cannot reliably establish original focus accuracy, "
+                         "original noise levels, compression versus preview-generation artifacts, or fine detail."],
+         "dimensions": {name: {"score": score, "reason": "Supported by visible preview evidence."}
+                        for name in DIMENSIONS}}
         for key in image_ids]}
 
 
@@ -26,36 +30,47 @@ class ReviewSchemaTests(unittest.TestCase):
         return parse_response(json.dumps(value), ids)
 
     def test_complete_structured_payload_and_equal_weight_mean(self):
-        value = response(("image_2", "image_1"))
-        value["reviews"][1]["scores"]["technical"]["score"] = 6
+        value = response(("image_1", "image_2"))
+        value["results"][0]["dimensions"]["technical"]["score"] = 6
         result = self.parse(value, ("image_1", "image_2"))
         self.assertEqual(list(result), ["image_1", "image_2"])
         self.assertEqual(result["image_1"]["overall_score"], 6.83)
         self.assertEqual(result["image_2"]["overall_score"], 7)
         self.assertNotIn("image_id", result["image_1"])
         self.assertEqual(validate_payload(result["image_1"]), result["image_1"])
-        value["reviews"][0]["scores"]["color"]["score"] = 0
-        self.assertEqual(result["image_2"]["scores"]["color"]["score"], 7)
+        value["results"][1]["dimensions"]["color"]["score"] = 0
+        self.assertEqual(result["image_2"]["dimensions"]["color"]["score"], 7)
 
     def test_invalid_shapes_fail_whole_batch(self):
         mutations = [
             lambda v: v.update(extra=True),
-            lambda v: v.update(schema_version="future"),
-            lambda v: v["reviews"].append(deepcopy(v["reviews"][0])),
-            lambda v: v["reviews"][0].update(image_id="other"),
-            lambda v: v["reviews"][0].update(extra="not allowed"),
-            lambda v: v["reviews"][0].update(description=" "),
-            lambda v: v["reviews"][0].update(strengths=[]),
-            lambda v: v["reviews"][0].update(limitations=[]),
-            lambda v: v["reviews"][0].update(improvements=["x"] * 9),
-            lambda v: v["reviews"][0]["scores"].pop("color"),
-            lambda v: v["reviews"][0]["scores"]["color"].update(reason=""),
-            lambda v: v["reviews"][0]["scores"]["color"].update(score="8"),
-            lambda v: v["reviews"][0]["scores"]["color"].update(score=True),
-            lambda v: v["reviews"][0]["scores"]["color"].update(score=11),
-            lambda v: v["reviews"][0]["scores"]["color"].update(score=-1),
-            lambda v: v["reviews"][0]["scores"]["color"].update(score=float("nan")),
-            lambda v: v["reviews"][0]["scores"]["color"].update(score=float("inf")),
+            lambda v: v.update(schema_version="photo-review-v2"),
+            lambda v: v["results"].append(deepcopy(v["results"][0])),
+            lambda v: v["results"][0].update(image_id="other"),
+            lambda v: v["results"][0].update(extra="not allowed"),
+            lambda v: v["results"][0].update(description=" "),
+            lambda v: v["results"][0].update(strengths=["x"] * 4),
+            lambda v: v["results"][0].update(limitations=[]),
+            lambda v: v["results"][0].update(improvements=["x"]),
+            lambda v: v["results"][0]["improvements"].extend(v["results"][0]["improvements"] * 3),
+            lambda v: v["results"][0]["dimensions"].pop("color"),
+            lambda v: v["results"][0]["dimensions"]["color"].update(reason=""),
+            lambda v: v["results"][0]["dimensions"]["color"].update(score="8"),
+            lambda v: v["results"][0]["dimensions"]["color"].update(score=True),
+            lambda v: v["results"][0]["dimensions"]["color"].update(score=11),
+            lambda v: v["results"][0]["dimensions"]["color"].update(score=-1),
+            lambda v: v["results"][0]["dimensions"]["color"].update(score=7.03),
+            lambda v: v["results"][0]["dimensions"]["color"].update(score=None),
+            lambda v: v["results"][0]["dimensions"]["color"].update(score=float("nan")),
+            lambda v: v["results"][0]["dimensions"]["color"].update(score=float("inf")),
+            lambda v: v["results"][0].update(review_status="partial"),
+            lambda v: v["results"][0].update(review_status=[]),
+            lambda v: v["results"][0]["improvements"][0].update(kind="select"),
+            lambda v: v["results"][0]["improvements"][0].update(tradeoff=" "),
+            lambda v: v["results"][0]["improvements"][0].update(action=False),
+            lambda v: v["results"][0]["improvements"][0].pop("tradeoff"),
+            lambda v: v["results"][0]["improvements"][0].update(extra=True),
+            lambda v: v["results"][0].update(overall_score=7),
         ]
         for mutate in mutations:
             value = response()
@@ -65,32 +80,26 @@ class ReviewSchemaTests(unittest.TestCase):
 
     def test_no_json_salvage_or_duplicate_keys(self):
         valid = json.dumps(response())
-        for text in ("Here is ```json\n" + valid + "\n```", "Here is " + valid, valid + valid,
-                     "```json\n" + valid + "\n```\nCommentary", "```python\n" + valid + "\n```",
-                     "```json\n" + valid + "\n```\n```json\n" + valid + "\n```",
-                     '{"schema_version":"x","schema_version":"y","reviews":[]}',
+        for text in ("Here is " + valid, valid + valid,
+                     '{"results":[],"results":[]}', valid.replace('"score": 7', '"score": 7, "score": 8'),
                      "[" * 2000, "x" * (MAX_RESPONSE_BYTES + 1), "\ud800"):
             with self.subTest(prefix=text[:50]), self.assertRaises(PhotographyError):
                 parse_response(text, ["image_1"])
 
-    def test_single_json_code_block_is_only_a_transport_wrapper(self):
-        value = response(("image_1", "image_2", "image_3", "image_4"))
-        ids = [item["image_id"] for item in value["reviews"]]
-        plain = json.dumps(value)
-        for tag in ("json", "JSON", ""):
-            self.assertEqual(parse_response("```" + tag + "\n" + plain + "\n```", ids),
-                             parse_response(plain, ids))
-        value["reviews"][0]["scores"]["technical"]["score"] = True
-        with self.assertRaises(PhotographyError):
-            parse_response("```json\n" + json.dumps(value) + "\n```", ids)
+    def test_v2_contract_rejects_even_a_single_json_code_block(self):
+        plain = json.dumps(response())
+        fence = chr(96) * 3
+        for tag in ("json", "JSON", "", "python"):
+            with self.assertRaises(PhotographyError):
+                parse_response(fence + tag + "\n" + plain + "\n" + fence, ["image_1"])
 
-    def test_duplicate_missing_ids_and_late_invalid_item(self):
+    def test_duplicate_missing_reordered_ids_and_late_invalid_item(self):
         for value in (response(("image_1", "image_1")), response(("image_1",)),
-                      response(("image_1", "image_3"))):
+                      response(("image_1", "image_3")), response(("image_2", "image_1"))):
             with self.assertRaises(PhotographyError):
                 self.parse(value, ("image_1", "image_2"))
         value = response(("image_1", "image_2"))
-        value["reviews"][1]["scores"]["subject"]["score"] = False
+        value["results"][1]["dimensions"]["subject"]["score"] = False
         with self.assertRaises(PhotographyError):
             self.parse(value, ("image_1", "image_2"))
 
@@ -100,19 +109,56 @@ class ReviewSchemaTests(unittest.TestCase):
         with self.assertRaises(PhotographyError):
             validate_payload(payload)
         payload = self.parse(response())["image_1"]
-        payload["scores"]["technical"]["score"] = 7.03
-        self.assertEqual(overall_score(payload["scores"]), 7.01)
+        payload["dimensions"]["technical"]["score"] = 7.03
+        payload["overall_score"] = overall_score(payload["dimensions"])
+        with self.assertRaises(PhotographyError):
+            validate_payload(payload)
+
+    def test_partial_and_unreviewable_keep_unknowns_and_empty_lists(self):
+        for unknown in range(7):
+            value = response()
+            entry = value["results"][0]
+            entry.update(strengths=[], improvements=[], review_status=(
+                "reviewed" if unknown == 0 else "unreviewable" if unknown == 6 else "partial"))
+            for name in DIMENSIONS[:unknown]:
+                entry["dimensions"][name] = {"score": None, "reason": "No interpretable visual evidence."}
+            result = self.parse(value)["image_1"]
+            self.assertEqual(result["overall_score"], None if unknown else 7)
+            self.assertEqual(result["review_status"], entry["review_status"])
+            for status in ("reviewed", "partial", "unreviewable"):
+                if status != entry["review_status"]:
+                    invalid = deepcopy(value)
+                    invalid["results"][0]["review_status"] = status
+                    with self.assertRaises(PhotographyError):
+                        self.parse(invalid)
+
+    def test_opaque_ids_empty_manifest_half_steps_and_structured_suggestions(self):
+        ids = ["opaque id/雪", "", "image-01"]
+        self.assertEqual(list(self.parse(response(ids), ids)), ids)
+        self.assertEqual(self.parse({"results": []}, []), {})
+        for score in (0, 0.5, 9.5, 10):
+            self.assertEqual(self.parse(response(score=score))["image_1"]["overall_score"], score)
+        value = response()
+        value["results"][0]["improvements"][0].update(kind="reshoot", tradeoff="Less surrounding context.")
+        self.parse(value)
+        for ids in (["a", "a"], [None], None):
+            with self.assertRaises(PhotographyError):
+                parse_response('{"results":[]}', ids)
 
     def test_versioned_profiles_and_prompt_are_stable_and_detached(self):
         profile = review_profile("vision-test")
+        self.assertEqual(profile["rubric_version"], "photo-review-v2")
         self.assertEqual(validate_profile(profile), profile)
         self.assertNotEqual(profile, review_profile("vision-test", "en"))
         prompt = build_prompt(profile, ["image_1", "image_2"])
         self.assertIn("Simplified Chinese", prompt)
         self.assertIn("original", prompt)
         self.assertIn('"maxItems": 2', prompt)
-        self.assertIn('"enum": ["image_1", "image_2"]', prompt)
-        self.assertEqual(set(RESPONSE_SCHEMA["properties"]["reviews"]["items"]["properties"]["scores"]
+        self.assertIn('"const": "image_1"', prompt)
+        self.assertIn('"attachment_index": 1', prompt)
+        self.assertNotIn("attachment_position", prompt)
+        self.assertIn('"output_language": "Simplified Chinese"', prompt)
+        self.assertEqual(set(RESPONSE_SCHEMA["properties"]["results"]["items"]["properties"]["dimensions"]
                              ["properties"]), set(DIMENSIONS))
         changed = deepcopy(profile)
         changed["prompt_text"] += "changed"

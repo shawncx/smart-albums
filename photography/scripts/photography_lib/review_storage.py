@@ -12,8 +12,9 @@ from uuid import uuid4
 
 from .config import PhotographyError
 from .fingerprints import fingerprint
-from .review_schema import DIMENSIONS, LIST_LIMIT, TEXT_LIMIT, validate_payload, validate_profile
+from .review_schema import DIMENSIONS, TEXT_LIMIT, dimension_scores, validate_payload, validate_profile
 from .thumbnails import stored_preview
+from . import review_storage_v1 as legacy_storage
 
 
 REVIEW_TABLES = ("ai_review_runs", "ai_review_batches", "ai_review_results")
@@ -22,8 +23,6 @@ BATCH_STATUSES = ("pending", "running", "completed", "failed", "interrupted", "s
 _INPUT_FIELDS = ("input_scope", "content_version", "thumbnail_profile", "input_image_hash",
                  "width", "height", "size_bytes")
 _PROFILE_COLUMNS = ("provider", "model", "language", "rubric_version", "sdk_version", "runtime_version")
-_PAYLOAD_FIELDS = ("schema_version", "overall_score", "description", "strengths",
-                   "improvements", "limitations", "scores")
 _METADATA_NUMBERS = ("elapsed_seconds", "input_tokens", "output_tokens", "reasoning_tokens", "cache_read_tokens",
                      "cache_write_tokens", "credits", "request_attempts")
 _METADATA_TEXT = ("model", "sdk_version", "runtime_version", "provider", "usage_source", "credits_unit")
@@ -70,23 +69,51 @@ _METADATA_CHECKS = ",\n".join([
       for key in _METADATA_TEXT],
 ])
 _SCORE_COLUMNS = ",\n".join(
-    f"{key}_score REAL NOT NULL CHECK(typeof({key}_score)='real' AND {key}_score BETWEEN 0 AND 10)"
+    f"{key}_score REAL CHECK(typeof({key}_score)='real' AND {key}_score BETWEEN 0 AND 10 OR {key}_score IS NULL)"
     for key in DIMENSIONS)
 _SQL_MEAN = "(" + "+".join(key + "_score" for key in DIMENSIONS) + ")/6.0"
-_PAYLOAD_CHECKS = ",\n".join([
-    _exact_object("payload_json", "$", _PAYLOAD_FIELDS),
-    _exact_object("payload_json", "$.scores", DIMENSIONS),
-    _projection("payload_json", "schema_version"),
-    _projection("payload_json", "description"),
-    _projection("payload_json", "overall_score", kind="number"),
-    *[_projection("payload_json", f"scores.{key}.score", f"{key}_score", "number") for key in DIMENSIONS],
-    *[_exact_object("payload_json", f"$.scores.{key}", ("score", "reason")) for key in DIMENSIONS],
-    *[_check(f"json_type(payload_json,'$.scores.{key}.reason')='text' AND "
-             + _text_check(f"json_extract(payload_json,'$.scores.{key}.reason')")) for key in DIMENSIONS],
-    *[_check(f"json_type(payload_json,'$.{key}')='array' AND "
-             f"json_array_length(payload_json,'$.{key}') BETWEEN 1 AND {LIST_LIMIT}")
-      for key in ("strengths", "improvements", "limitations")],
-])
+
+
+def _v2_payload_checks():
+    document = "payload_json"
+    fields = ("schema_version", "overall_score", "review_status", "description", "dimensions",
+              "strengths", "improvements", "limitations")
+    checks = [
+        _exact_object(document, "$", fields),
+        _exact_object(document, "$.dimensions", DIMENSIONS),
+        _projection(document, "schema_version"), _projection(document, "description"),
+        _check("json_type(payload_json,'$.overall_score') IN ('integer','real','null') "
+               "AND json_extract(payload_json,'$.overall_score') IS overall_score"),
+        _check("json_type(payload_json,'$.review_status')='text' AND "
+               "json_extract(payload_json,'$.review_status')=CASE "
+               "WHEN " + " AND ".join(key + "_score IS NOT NULL" for key in DIMENSIONS) + " THEN 'reviewed' "
+               "WHEN " + " AND ".join(key + "_score IS NULL" for key in DIMENSIONS) + " THEN 'unreviewable' "
+               "ELSE 'partial' END"),
+    ]
+    for key in DIMENSIONS:
+        path = "$.dimensions." + key
+        checks.extend([
+            _exact_object(document, path, ("score", "reason")),
+            _check(f"json_type({document},'{path}.score') IN ('integer','real','null') "
+                   f"AND json_extract({document},'{path}.score') IS {key}_score "
+                   f"AND ({key}_score IS NULL OR {key}_score*2=CAST({key}_score*2 AS INTEGER))"),
+            _check(f"json_type({document},'{path}.reason')='text' AND "
+                   + _text_check(f"json_extract({document},'{path}.reason')")),
+        ])
+    for key in ("strengths", "improvements", "limitations"):
+        bound = ">=1" if key == "limitations" else "BETWEEN 0 AND 3"
+        checks.append(_check(f"json_type({document},'$.{key}')='array' AND "
+                             f"json_array_length({document},'$.{key}') {bound}"))
+    return ",\n".join(checks)
+
+
+def _for_version(checks, version):
+    return checks.replace("CHECK(COALESCE((", f"CHECK(COALESCE((schema_version<>'{version}' OR (") \
+                 .replace("),0))", ")),0))")
+
+
+_PAYLOAD_CHECKS = _for_version(legacy_storage._PAYLOAD_CHECKS, "photo-review-v1") + ",\n" + \
+                  _for_version(_v2_payload_checks(), "photo-review-v2")
 _PROVENANCE_CHECKS = ",\n".join([
     _exact_object("input_manifest_json", "$", _INPUT_FIELDS),
     *[_projection("input_manifest_json", key, kind="integer" if key in ("width", "height", "size_bytes") else "text")
@@ -138,8 +165,8 @@ REVIEW_SCHEMA = (
         input_manifest_json TEXT NOT NULL CHECK(json_valid(input_manifest_json)),
         payload_json TEXT NOT NULL CHECK(json_valid(payload_json)),
         metadata_json TEXT NOT NULL CHECK(json_valid(metadata_json) AND json_type(metadata_json)='object'),
-        schema_version TEXT NOT NULL CHECK(schema_version='photo-review-v1'),
-        rubric_version TEXT NOT NULL CHECK(rubric_version='photo-review-v1'),
+        schema_version TEXT NOT NULL CHECK(schema_version IN ('photo-review-v1','photo-review-v2')),
+        rubric_version TEXT NOT NULL CHECK(rubric_version=schema_version),
         provider TEXT NOT NULL CHECK(provider='github-copilot'), model TEXT NOT NULL,
         language TEXT NOT NULL CHECK(language IN ('zh-CN','en')),
         sdk_version TEXT NOT NULL, runtime_version TEXT NOT NULL,
@@ -150,13 +177,14 @@ REVIEW_SCHEMA = (
         size_bytes INTEGER NOT NULL CHECK(typeof(size_bytes)='integer' AND size_bytes>0),
         description TEXT NOT NULL CHECK({_text_check("description")}),
         {_SCORE_COLUMNS},
-        overall_score REAL NOT NULL CHECK(typeof(overall_score)='real' AND overall_score BETWEEN 0 AND 10),
+        overall_score REAL CHECK(overall_score IS NULL OR (typeof(overall_score)='real' AND overall_score BETWEEN 0 AND 10)),
         created_at TEXT NOT NULL CHECK(length(created_at)=32 AND substr(created_at,27)='+00:00'
             AND datetime(created_at) IS NOT NULL),
         UNIQUE(photo_id,batch_id),
         FOREIGN KEY(run_id,profile_id) REFERENCES ai_review_runs(run_id,profile_id),
         FOREIGN KEY(batch_id,run_id) REFERENCES ai_review_batches(batch_id,run_id),
         {_PAYLOAD_CHECKS}, {_PROVENANCE_CHECKS}, {_METADATA_CHECKS},
+        {_check("(overall_score IS NULL)=(" + " OR ".join(key + "_score IS NULL" for key in DIMENSIONS) + ")")},
         CHECK(overall_score=round(overall_score,2)),
         CHECK(overall_score BETWEEN round({_SQL_MEAN}-0.00000000000001,2)
             AND round({_SQL_MEAN}+0.00000000000001,2)),
@@ -211,9 +239,22 @@ REVIEW_SCHEMA = (
         WHEN EXISTS(SELECT 1 FROM (
             SELECT type,value FROM json_each(new.payload_json,'$.strengths')
             UNION ALL SELECT type,value FROM json_each(new.payload_json,'$.improvements')
+                WHERE new.schema_version='photo-review-v1'
             UNION ALL SELECT type,value FROM json_each(new.payload_json,'$.limitations')) item
             WHERE item.type<>'text' OR NOT ({_text_check("item.value")}))
         BEGIN SELECT RAISE(ABORT,'Review lists must contain bounded nonempty text'); END""",
+    f"""CREATE TRIGGER ai_review_result_improvements BEFORE INSERT ON ai_review_results
+        WHEN new.schema_version='photo-review-v2' AND EXISTS(
+            SELECT 1 FROM json_each(new.payload_json,'$.improvements') item
+            WHERE item.type<>'object' OR NOT COALESCE((
+                json_remove(item.value,'$.kind','$.action','$.rationale','$.tradeoff')='{{}}'
+                AND json_extract(item.value,'$.kind') IN ('edit','reshoot')
+                AND json_type(item.value,'$.action')='text' AND {_text_check("json_extract(item.value,'$.action')")}
+                AND json_type(item.value,'$.rationale')='text' AND {_text_check("json_extract(item.value,'$.rationale')")}
+                AND (json_type(item.value,'$.tradeoff')='null' OR
+                    (json_type(item.value,'$.tradeoff')='text' AND {_text_check("json_extract(item.value,'$.tradeoff')")}))
+            ),0))
+        BEGIN SELECT RAISE(ABORT,'Invalid structured review improvement'); END""",
     """CREATE TRIGGER ai_review_run_initial BEFORE INSERT ON ai_review_runs
         WHEN new.status<>'planned' OR new.revision<>0 OR new.request_attempts<>0 OR new.elapsed_seconds<>0
             OR new.confirmed_digest IS NOT NULL OR new.approval_history_json<>'[]'
@@ -320,10 +361,10 @@ def _manifest(value):
     return value
 
 
-@lru_cache(maxsize=1)
-def review_schema_registry():
+@lru_cache(maxsize=2)
+def review_schema_registry(version=12):
     with closing(sqlite3.connect(":memory:")) as reference:
-        for statement in REVIEW_SCHEMA:
+        for statement in (legacy_storage.REVIEW_SCHEMA if version == 11 else REVIEW_SCHEMA):
             reference.execute(statement)
         objects = {(row[0], row[1]): row[2] for row in reference.execute(
             "SELECT type,name,sql FROM sqlite_master WHERE sql IS NOT NULL AND name NOT GLOB 'sqlite_*'")}
@@ -359,7 +400,8 @@ class ReviewStorage:
         return expected
 
     def validate_review_schema(self):
-        self._validate_registered_schema(REVIEW_TABLES, review_schema_registry())
+        self._validate_registered_schema(REVIEW_TABLES, review_schema_registry(
+            self.db.execute("PRAGMA user_version").fetchone()[0]))
 
     def _review_input_current(self, photo_id, manifest):
         photo = self.photo(photo_id)
@@ -442,6 +484,10 @@ class ReviewStorage:
     def create_review_run(self, plan):
         with _write(self):
             plan = self._review_plan(_load(_json(plan)), current=True)
+            if (plan["profile"]["output_schema_version"] == "photo-review-v2"
+                    and self.db.execute("PRAGMA user_version").fetchone()[0] == 11):
+                raise PhotographyError("REVIEW_UPGRADE_REQUIRED",
+                                       "Use review upgrade --output <new-album.sqlite> and select that copy for v2 reviews.")
             stamp = _timestamp()
             self.db.execute("""INSERT INTO ai_review_runs
                 (run_id,profile_id,digest,plan_json,status,created_at,updated_at)
@@ -540,6 +586,8 @@ class ReviewStorage:
             # Exact decimal half-up validation belongs here; SQLite's binary mean
             # constraint allows its rounding uncertainty at a half-cent boundary.
             payload = validate_payload(payload)
+            _require(payload["schema_version"] == profile["output_schema_version"],
+                     "Review payload version does not match its frozen profile.")
             _manifest(input_manifest)
             metadata = _metadata(metadata, profile)
             run = self.review_run(run_id)
@@ -565,7 +613,7 @@ class ReviewStorage:
                 "payload_json": _json(payload), "metadata_json": _json(metadata),
                 "schema_version": payload["schema_version"], **{key: profile[key] for key in _PROFILE_COLUMNS},
                 **input_manifest, "description": payload["description"], "overall_score": payload["overall_score"],
-                **{key + "_score": payload["scores"][key]["score"] for key in DIMENSIONS}, "created_at": stamp,
+                **{key + "_score": dimension_scores(payload)[key]["score"] for key in DIMENSIONS}, "created_at": stamp,
             }
             self.db.execute("INSERT INTO ai_review_results (" + ",".join(record) + ") VALUES ("
                             + ",".join("?" for _ in record) + ")", tuple(record.values()))
@@ -584,12 +632,13 @@ class ReviewStorage:
             _require(_metadata(result["metadata"], result["profile"]) == result["metadata"]
                      and result["profile_id"] == fingerprint(result["profile"])
                      and result["input_fingerprint"] == fingerprint(result["input_manifest"])
+                     and result["schema_version"] == result["profile"]["output_schema_version"]
                      and all(result[key] == result["profile"][key] for key in _PROFILE_COLUMNS)
                      and all(result[key] == result["input_manifest"][key] for key in _INPUT_FIELDS)
                      and all(result[key] == result["payload"][key] for key in
                              ("schema_version", "description", "overall_score"))
                      and all(result["metadata"].get(key, result[key]) == result[key] for key in _PROFILE_COLUMNS)
-                     and all(result[key + "_score"] == result["payload"]["scores"][key]["score"] for key in DIMENSIONS),
+                     and all(result[key + "_score"] == dimension_scores(result["payload"])[key]["score"] for key in DIMENSIONS),
                      "Saved review payload and searchable projections disagree.")
             run = self.review_run(result["run_id"])
             batch = next((batch for batch in self.review_batches(result["run_id"])

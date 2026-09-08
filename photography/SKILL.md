@@ -1,6 +1,6 @@
 ---
 name: smart-albums
-description: "Use for exactly four photography capabilities on one explicitly selected SQLite album file: ingestion of local photos and proportional previews; index setup/configuration, resumable image embeddings and six opt-in local feature components; management for album-file lifecycle, manual static virtual folders, scoped browsing/search, date organization and explicit original-path repair; review for explicitly approved optional Copilot photography reviews with structured scores and history."
+description: "Use for exactly four photography capabilities on one explicitly selected SQLite album file: ingestion of local photos and proportional previews; index setup/configuration, resumable image embeddings and six opt-in local feature components; management for album-file lifecycle, manual static virtual folders, scoped browsing/search, duplicate discovery, date organization and explicit original-path repair; review for explicitly approved optional Copilot photography reviews with structured scores and history."
 ---
 
 # Smart Albums
@@ -15,7 +15,7 @@ One Skill exposes exactly these four capabilities. They are independent, not an 
 | --- | --- | --- |
 | ingestion | Import/rescan a folder into the selected album file | `ingestion <absolute-photo-root>` |
 | index | Install/verify local assets, choose a component/profile, prepare embeddings or opt-in feature evidence, inspect or resume confirmed work | `index setup`, `profiles`, `configure`, `register-profile`, `plan`, `execute`, `status`, `result`, `result-history`, `prototypes`, `compare`, `pairs`, `rebuild-fts`, `job`, `resume` |
-| management | Create/open/backup the album file; manually manage virtual folders; browse/search saved photos in an explicit scope; export previews; locate/relink originals; inspect scans | `management create`, `open`, `backup`, `folders`, `photos`, `photo`, `search` (unified default; explicit metadata/semantic compatibility), `search-evidence`, `show-results`, legacy `query`, `query-evidence`, `finalize-query`, `show-query-results`, `query-pairs`, `original`, `relink`, `thumbnail`, `scan`, `scan-events` |
+| management | Create/open/backup the album file; manually manage virtual folders; browse/search or find duplicates in an explicit scope; export previews; locate/relink originals; inspect scans | `management create`, `open`, `backup`, `folders`, `photos`, `photo`, `search` (unified default; explicit metadata/semantic compatibility), `duplicates`, `search-evidence`, `show-results`, legacy `query`, `query-evidence`, `finalize-query`, `show-query-results`, `query-pairs`, `original`, `relink`, `thumbnail`, `scan`, `scan-events` |
 | review | Plan and explicitly approve optional Copilot review of existing saved JPEG previews; inspect versioned structured scores/history and export a local HTML report | `review rubric`, `models`, `plan`, `execute`, `job`, `resume`, `result`, `history`, `report` |
 
 Browse/search is read-only. Album creation, manual folder membership and original-path maintenance are explicit management writes, not additional capabilities. Virtual folders are static, flat many-to-many collections inside one SQLite album, not internal albums or disk directories. Optional cloud photography analysis belongs only to explicit `review`, never an ingestion/index/search fallback. There are no selection widgets or old multi-album compatibility commands. Cross-album search, clustering, duplicate removal, image-to-image search, automatic regrouping/curation and standalone speech recognition are outside this version.
@@ -148,6 +148,14 @@ Comparisons stream fingerprint distances without an N×N dense matrix. `pairs` r
 ## management
 
 Read [management](references/management.md). Use `management open`, `management photos` or `management photo <photo-id>` to browse the selected album. No model installation, default profile or cloud credential is needed. Saved previews can be viewed without originals.
+
+### Duplicate discovery
+
+Route requests such as “查重”, “列出所有可能重复的照片” or “find duplicate photos” to `management duplicates`, independently of search. Read [duplicates](references/duplicates.md) for scan scopes, modes, coverage and paged groups/pairs. Use `duplicates scan` with an explicit scope and JSON output, optionally with a complete local HTML report for the user. The scan enumerates every match under the selected rules; do not apply Search's candidate limit, AI selection or top-K to duplicate results.
+
+Default mode `all` combines saved SHA-256 equality and current dHash64 matches. Exact mode needs no feature profile. Missing/stale/unconfigured hashes produce partial coverage, not a claim that no duplicates exist; identify the affected IDs through the snapshot and only prepare index work within the user's requested scope. Index setup/execution retains its own authorization rules. No index or comparison run is started by this management command.
+
+Groups are connected candidates: A–B and B–C do not prove A–C. Use `duplicates pairs` to inspect direct evidence and preserve exact/similar labels. Group/member numbers belong to their snapshot. Display all results through pagination or the full local report, without opening photo-containing HTML or previews in an agent vision tool. Frozen results are historical; report previews are checked against their saved identities. This workflow never deletes/merges photos, changes folder membership, selects a keeper or verifies live originals.
 
 ### Manual custom virtual folders: primary workflow
 

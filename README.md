@@ -6,7 +6,7 @@
 | --- | --- |
 | **ingestion** | Import local photo metadata, original paths and proportional JPEG previews into the selected album. |
 | **index** | Explicitly set up/configure, plan, generate/reuse, inspect and resume image embeddings or six opt-in local feature components. |
-| **management** | Create/open/backup the album file, manually manage static virtual folders, browse/search within explicit scopes, organize by saved date and locate/relink originals. |
+| **management** | Create/open/backup the album file, manually manage static virtual folders, browse/search and find duplicates within explicit scopes, organize by saved date and locate/relink originals. |
 | **review** | Explicitly plan and approve optional Copilot photo reviews of saved previews; inspect structured scores, results and history. |
 
 These are not an automatic pipeline. Ingestion never calls a model. Browse/search never writes the database or checks original files; creation, folder membership and original-path maintenance are explicit management operations. Review is never triggered by ingestion, index or search. The program never deletes originals or automatically regroups folders.
@@ -136,6 +136,20 @@ Feature status is `ready|missing|stale|invalid_input|invalid_result|dependency_m
 Results default to summaries (OCR `text_length` and block `detail_count`), with explicitly requested, paged `--details`; never dump whole-album OCR text. `result-history` pages result IDs; `result --result-id` reads that exact historical result and pages its details independently by offset. No configured default is needed for an explicit result ID; the photo/component and optional `--profile-id` must match, otherwise `FEATURE_RESULT_MISMATCH`. Its `historical: true` response is not current coverage. A successful empty result differs from not computed; `complete: false` cannot prove exhaustive counts or absence. Pair comparison streams distances without an N×N dense matrix; absent pairs outside a completed scope prove nothing. It never deletes/merges photos or changes folders. `rebuild-fts --confirm` is an explicit write rebuilding only derived text from saved documents, without originals/models.
 
 ## management: manual folders, scoped search and maintenance
+
+### Duplicate discovery
+
+`management duplicates` finds all exact and suspected duplicates in an explicit scope, independently of Search's candidate selection. Default mode `all` combines saved SHA-256 equality and current same-profile dHash64 matches; `exact` requires no feature index. Results are frozen JSON with complete enumeration, paged candidate groups/direct pairs, and optional HTML containing all matched photos. Connected candidates are not necessarily pairwise duplicates.
+
+```text
+python photography\scripts\photography.py --database <absolute-album.sqlite> management duplicates scan --all --output <absolute-snapshot.json> --html <absolute-report.html>
+python photography\scripts\photography.py --database <absolute-album.sqlite> management duplicates scan --folder-id <folder-id> --mode exact --output <absolute-snapshot.json>
+python photography\scripts\photography.py --database <absolute-album.sqlite> management duplicates groups <absolute-snapshot.json> --limit 50
+python photography\scripts\photography.py --database <absolute-album.sqlite> management duplicates group <absolute-snapshot.json> --group-id <group-id> --limit 100
+python photography\scripts\photography.py --database <absolute-album.sqlite> management duplicates pairs <absolute-snapshot.json> --group-id <group-id> --limit 100
+```
+
+Missing/stale hash evidence is reported as incomplete coverage while preserving known matches; it never triggers indexing. The initial Hamming threshold is 8, not a calibrated duplicate probability. Exact grouping uses linear storage/time; similar scanning uses linear storage and quadratic comparisons. No album migration, model download, original-file access, photo deletion or folder changes occur. See [duplicate reference](photography/references/duplicates.md) for full modes, cursors and recovery.
 
 ### Manual custom folders are the primary workflow
 

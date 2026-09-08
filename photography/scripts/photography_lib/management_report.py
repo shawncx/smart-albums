@@ -1,14 +1,13 @@
 """Standalone Chinese reports bound to one album and its saved preview identities."""
 from __future__ import annotations
 
-import base64
-import hashlib
 import html
 import json
 
 from .config import PhotographyError
 from .exports import prepare_export, write_export
 from .management import snapshot_scope, validate_snapshot_album
+from .report_preview import snapshot_preview as _preview
 from .source_paths import photo_filename
 
 
@@ -18,28 +17,6 @@ def _text(value):
 
 def _json(value):
     return _text(json.dumps(value, ensure_ascii=False, indent=2, allow_nan=False))
-
-
-def _preview(item, store):
-    from .thumbnails import stored_preview
-
-    try:
-        identity = (item.get("content_version"), item.get("thumbnail_profile"), item.get("input_image_hash"))
-        if not all(isinstance(value, str) and value for value in identity):
-            raise PhotographyError("INVALID_PREVIEW", "This snapshot has no matching saved preview identity.")
-        photo = store.photo(item["photo_id"])
-        if (photo.get("content_version"), photo.get("thumbnail_profile")) != identity[:2]:
-            raise PhotographyError("PHOTO_CHANGED", "Photo changed since this snapshot; no replacement preview is shown.")
-        thumbnail = store.thumbnail(item["photo_id"], include_data=False)
-        if (thumbnail["content_version"], thumbnail["profile"], thumbnail["image_hash"]) != identity:
-            raise PhotographyError("PHOTO_CHANGED", "Preview changed since this snapshot; no replacement preview is shown.")
-        data = stored_preview(photo, store)
-        if (thumbnail.get("mime_type") != "image/jpeg" or len(data) != thumbnail.get("size_bytes")
-                or hashlib.sha256(data).hexdigest() != identity[2]):
-            raise PhotographyError("INVALID_PREVIEW", "Stored preview failed its snapshot integrity check.")
-        return '<img alt="已保存的照片预览" src="data:image/jpeg;base64,' + base64.b64encode(data).decode("ascii") + '">'
-    except (PhotographyError, KeyError) as exc:
-        return '<p class="preview-error">预览不可用：' + _text(exc) + "</p>"
 
 
 def management_report(snapshot, output, *, config, store):

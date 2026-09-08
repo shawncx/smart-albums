@@ -121,6 +121,9 @@ def add_commands(root_subparsers):
     from .condition_cli import add_commands as add_conditions
 
     add_conditions(actions)
+    from .duplicates_cli import add_commands as add_duplicates
+
+    add_duplicates(actions)
 
 
 def _search_limit(value):
@@ -257,6 +260,10 @@ def _unified_selection(args, snapshot, store, config):
 
 def command(args, store, config):
     action = args.management_command
+    if action == "duplicates":
+        from .duplicates_cli import command as duplicate_command
+
+        return duplicate_command(args, store, config)
     if action in ("query", "query-evidence", "finalize-query", "show-query-results", "query-pairs"):
         from .condition_cli import command as condition_command
 

@@ -38,12 +38,22 @@ Use scores from 0 to 10 in increments of 0.5:
 - 0-2.5: severely ineffective in this dimension, with clear visible evidence.
 - 3-4.5: substantial visible weaknesses.
 - 5-6.5: competent, with noticeable limitations in effectiveness.
-- 7-8.5: strong, coherent, and effective.
+- 7: a strong, clear effect, with a noticeable constraint on its consistency or impact.
+- 7.5: a strong, coherent effect, with a minor but identifiable constraint on its impact.
+- 8: a strong effect sustained through the relevant visual relationships; remaining constraints have little impact.
+- 8.5: a particularly compelling, well-integrated effect, approaching exceptional effectiveness.
 - 9-10: exceptional effectiveness within this rubric, supported by specific visible evidence.
 
 A 10 does not require historical importance, a famous subject, or proof of flawless original-file quality. Do not inflate scores to be polite, deflate them to appear rigorous, or impose an artificial ceiling. Do not force scores to differ or let general liking or disliking determine every dimension.
 
-For each dimension, give a concise reason, normally 1-2 sentences: identify concrete visible elements, explain their visual effect, and connect that effect to the score. Avoid generic statements such as "good composition" or "beautiful light" without evidence. The same feature may affect several dimensions only when its distinct effect in each is explained.
+For each numeric dimension, make reason a concise score justification, normally 2-3 sentences:
+- Identify the concrete visible evidence and its effect in this dimension: what earns the score, not just what is in the image.
+- Explain the main visible weakness or limit to the demonstrated effect, its location or visual relationship, and how much it matters. A score below 9 needs an explanation of what holds it below the next anchor; do not leave this explanation only in improvements.
+- Connect that balance to the chosen anchor, distinguishing it from the nearest lower and higher applicable anchors. For example, a minor interruption of an otherwise strong effect can support 7.5 rather than the noticeable constraint at 7 or the sustained effect at 8. Name the actual interruption and its consequence; repeating anchor adjectives is not a justification.
+
+These are qualitative judgments, not measured half-point differences. If adjacent anchors are difficult to distinguish, briefly acknowledge the borderline judgment in reason and choose the closest supported anchor. Do not fabricate exact deductions. The same feature may affect several dimensions only when its distinct consequence in each is explained.
+
+Do not invent a flaw to explain a score, or add generic criticism such as "could be more impactful." When no meaningful weakness is visible, explain the extent and strength of the demonstrated effect and reconsider any unsupported score ceiling; absence of a defect alone does not establish excellence. Lack of people, action, a single focal object, dramatic light, or access to original-file detail is not a deduction. State a constraint only when the visible evidence shows how it reduces effectiveness in this dimension. For low scores, do not invent strengths either.
 
 Use null only when the image does not provide enough interpretable evidence to assess that dimension. Explain the missing evidence in reason. Never use 0 or a midpoint as a substitute for unknown. Preview resolution alone does not require null; absence of color or literal narrative does not require null either.
 
@@ -79,7 +89,7 @@ results is an array. Each result must contain exactly these keys:
 3. description: a nonempty string.
 4. dimensions: an object with exactly the keys composition, lighting, color, subject, storytelling, and technical. Each value is an object with exactly:
    - score: a number from 0 to 10 in increments of 0.5, or null.
-   - reason: a nonempty, evidence-based string; for null, explain why assessment is not possible.
+   - reason: a nonempty string justifying the score through visible evidence, its effect, and the limiting factor or demonstrated strength that distinguishes nearby anchors; for null, explain why assessment is not possible.
 5. strengths: an array of 0-3 nonempty strings.
 6. improvements: an array of 0-3 objects, each containing exactly:
    - kind: "edit" or "reshoot".

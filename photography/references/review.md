@@ -103,11 +103,13 @@ The bundled rubric and output schema are `photo-review-v2`. Structural success r
 
 Each dimension contains a 0–10 score in increments of 0.5, or null, and a nonempty `reason`. `review_status` is `reviewed` for six numeric scores, `partial` for a mix of numeric and null scores, and `unreviewable` for six nulls. Missing evidence never becomes zero or a midpoint. `description` is nonempty; `strengths` allows 0–3 nonempty strings. `improvements` allows 0–3 objects with exactly `kind` (`edit` or `reshoot`), nonempty `action` and `rationale`, and a nonempty `tradeoff` or null. `limitations` is a nonempty array of nonempty strings.
 
+The bundled prompt requires each numeric `reason` to justify the rating in normally 2–3 sentences: visible evidence and its effect, the main constraint and its impact (or the strength demonstrated when no meaningful weakness is visible), and why that balance fits the chosen anchor rather than its neighbors. A sub-9 score needs its ceiling explained in that dimension, not only in `improvements`. The prompt distinguishes 7, 7.5, 8 and 8.5 qualitatively; borderline judgments should be acknowledged rather than presented as measured half-point deductions. Never invent defects, reward their absence alone, or penalize missing people/events, a distributed subject, soft light or unavailable original-file detail. The JSON shape is unchanged. Prompt edits change the saved prompt hash and reuse profile: new plans do not reuse earlier-prompt results, while saved history and its original reasons remain readable.
+
 Each text field is limited to 4,000 characters and the raw response, including any wrapper, to 1 MiB as application resource bounds. Scores must be finite numbers, never booleans. The prompt requests bare JSON; the parser also accepts exactly one complete triple-backtick code block labeled `json` (case-insensitive) or unlabeled, with only whitespace outside it. Removing this transport wrapper does not change the JSON or require another provider call. Reject other language labels, surrounding prose, multiple/nested blocks, malformed JSON, extra/missing fields, duplicate JSON keys, unknown/duplicate/missing image IDs, reordered results, incomplete batches and NaN/infinity. These v2 payload checks retain the limited single-code-block transport compatibility used in v1; they never extract an object from prose, repair JSON or relax field validation.
 
 Failed response validation includes content-free diagnostics in the saved batch error's `details`: `response_format`, UTF-8 `response_bytes` and `response_sha256` when available, plus JSON `line`/`column` for syntax errors. Format names describe the envelope, not schema validity; line/column refer to the JSON body when a wrapper was removed. `review job` and retry approval history preserve these diagnostics alongside the existing attempt usage. Neither raw response text nor images are retained in diagnostics. Old failures have only their original error fields and cannot be replayed from these records; do not infer a code fence merely from a line-1/column-1 error.
 
-Structural validation checks field/type/range/count/order and score/status consistency. It does **not** establish evidence grounding, output language, required preview-limit meaning, or whether actions preserve the image's strengths. Semantically inspect descriptions/reasons, prioritized actions with visible rationale/benefit, conditional reshoots, meaningful trade-offs and all required limitation topics: original focus accuracy, original noise levels, compression versus preview-generation artifacts, and fine detail. A structurally valid response alone is not proof of full rubric compliance. For missing, unreadable or ambiguously mapped input the contract requires all-null scores, explanatory description/reasons, empty strengths/improvements and both the input problem and mandatory preview limitation. Local preview preflight prevents invalid attachments from being sent in normal execution.
+Structural validation checks field/type/range/count/order and score/status consistency. It does **not** establish evidence grounding, score-justification quality, output language, required preview-limit meaning, or whether actions preserve the image's strengths. Semantically inspect whether reasons explain both the earned score and its ceiling, not merely describe or praise the image. Also inspect prioritized actions with visible rationale/benefit, conditional reshoots, meaningful trade-offs and all required limitation topics: original focus accuracy, original noise levels, compression versus preview-generation artifacts, and fine detail. A structurally valid response alone is not proof of full rubric compliance. For missing, unreadable or ambiguously mapped input the contract requires all-null scores, explanatory description/reasons, empty strengths/improvements and both the input problem and mandatory preview limitation. Local preview preflight prevents invalid attachments from being sent in normal execution.
 
 Illustrative one-image **provider response**, not a measured result:
 
@@ -116,9 +118,9 @@ Illustrative one-image **provider response**, not a measured result:
   "results": [
     {
       "image_id": "image_1",
-      "description": "A simple arrangement with a clear visual center.",
+      "description": "Two dark curved forms cross over a pale background, with a bright strip touching the right edge.",
       "strengths": [
-        "The main shape is easy to follow."
+        "The crossing curves create a clear inward visual movement."
       ],
       "improvements": [
         {
@@ -135,27 +137,27 @@ Illustrative one-image **provider response**, not a measured result:
       "dimensions": {
         "composition": {
           "score": 7,
-          "reason": "The arrangement has a clear hierarchy."
+          "reason": "The crossing curves create a clear inward path, but the bright right strip repeatedly pulls attention away from their meeting point. That noticeable competition supports a strong 7 rather than the more consistent hierarchy at 7.5; the readable central path keeps it above competent execution."
         },
         "lighting": {
           "score": 6,
-          "reason": "The visible tones separate adequately."
+          "reason": "The curved forms separate from the pale ground, but their similarly dark inner surfaces merge at the crossing and flatten the overlap. The usable outer separation supports a competent 6, while the loss of depth keeps it below a more effective 6.5–7."
         },
         "color": {
           "score": 7,
-          "reason": "The restrained palette is coherent."
+          "reason": "The charcoal-to-pale-gray palette coherently emphasizes the curves, but the near-white edge strip noticeably disrupts its otherwise restrained tonal balance. This supports a strong 7 above merely competent color relationships, while the interruption limits a 7.5."
         },
         "subject": {
           "score": 6,
-          "reason": "The visual idea is recognizable."
+          "reason": "The two interlocking forms establish a readable visual idea, but their merged center makes the relationship harder to explore beyond the initial outline. That unresolved junction places the subject around 6 rather than a stronger 6.5–7; the distinctive crossing keeps it above basic recognition alone."
         },
         "storytelling": {
           "score": 5,
-          "reason": "The atmosphere is calm but the narrative is limited."
+          "reason": "The inward curves suggest enclosure, but the outward pull of the bright strip repeatedly interrupts that feeling before it develops. The atmosphere remains tentative rather than sustained, supporting about 5 instead of 5.5; the visible tension still gives it more resonance than a substantially ineffective treatment."
         },
         "technical": {
           "score": 6,
-          "reason": "Edges appear adequate at preview scale."
+          "reason": "Most contours are readable, but visible blockiness along the upper curve interrupts its smooth sweep at preview scale. The generally intact shapes support about 6 rather than 5.5, while that recurring interruption limits a cleaner 6.5; its source in the original or preview cannot be determined."
         }
       }
     }
@@ -203,3 +205,5 @@ After approved execution, export and display the local HTML report with actual/u
 The trial uncovered and fixed native Windows working-directory handling, teardown of application-owned custom session files, and single-code-block JSON transport compatibility. Fresh consent preceded every actual retry. Owned state was empty afterward; this does not prove zero provider retention or general image-assessment quality. Reported nano-AIU is not an independently verified account charge, and existing trial consent does not authorize future uploads.
 
 The v2 rollout is validated with synthetic provider responses, stored previews and local integration tests. A later v2 trial produced two first-batch JSON syntax failures; neither preserved response text, so their exact transport format is unknown. Limited single-code-block compatibility and content-free failure diagnostics now have local regression coverage, including batch persistence, atomic rejection and retry history. After the fix, an approved `gpt-5.6-luna` trial completed and persisted all 10 reviews on the first attempt for each image, using 10 single-image requests to match the provider's declared limit. Active execution took 217.825 seconds, with 80,097 input and 9,841 output tokens reported. Both model and batch size changed, so this success does not isolate the parser fix or establish comparative model reliability; structural validation and text inspection do not verify visual judgment quality.
+
+The expanded score-justification instructions were added after these live trials. Their prompt/profile compatibility has been checked locally; better score explanations have not yet been verified in a new provider run. Earlier saved reviews retain their original prompt and reasons.

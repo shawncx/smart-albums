@@ -166,6 +166,64 @@ class ReviewExecutionTests(ReviewFixture):
         self.assertEqual(failed["error"]["code"], "REVIEW_RESPONSE_INVALID")
         self.assertEqual(self.store.review_run_results(plan["run_id"]), [])
 
+    def test_fenced_reply_commits_batches_and_preserves_usage(self):
+        class WrappedProvider(FakeReviewProvider):
+            def review(self, request):
+                reply = super().review(request)
+                return SimpleNamespace(text="```json\n" + reply.text + "\n```",
+                                       metadata={"input_tokens": 123, "output_tokens": 45})
+        plan = self.plan(self.ids[:5])
+        provider = WrappedProvider()
+        done = self.execute(plan, provider)
+        self.assertEqual(done["status"], "completed", done.get("error"))
+        self.assertEqual([len(request.images) for request in provider.requests], [4, 1])
+        with SQLiteStorage.open(self.database) as reopened:
+            saved = review.job(reopened, plan["run_id"])
+            self.assertEqual(saved["summary"]["reviewed"], 5)
+            for batch in saved["batches"]:
+                metadata = batch["metadata"]
+                self.assertEqual((metadata["input_tokens"], metadata["output_tokens"]), (123, 45))
+            for photo_id in self.ids[:5]:
+                self.assertEqual(review.result(reopened, photo_id)["status"], "ready")
+
+    def test_fenced_invalid_result_still_rejects_entire_batch(self):
+        class WrappedProvider(FakeReviewProvider):
+            def review(self, request):
+                reply = super().review(request)
+                return SimpleNamespace(text="```json\n" + reply.text + "\n```", metadata={})
+        def invalid(request, value, ordinal):
+            value["results"][-1]["dimensions"]["technical"]["score"] = True
+        plan = self.plan(self.ids[:5])
+        provider = WrappedProvider(invalid)
+        failed = self.execute(plan, provider)
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(failed["results"], [])
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(failed["batches"][1]["status"], "pending")
+        self.assertEqual(failed["batches"][0]["error"]["details"]["response_format"], "json_code_block")
+
+    def test_failed_response_diagnostics_and_usage_survive_an_approved_retry(self):
+        text = "Private model text instead of JSON."
+        provider = Mock()
+        provider.review.return_value = SimpleNamespace(text=text, metadata={"input_tokens": 123, "output_tokens": 45})
+        plan = self.plan(self.ids[:5])
+        failed = self.execute(plan, provider)
+        self.assertEqual(failed["status"], "failed")
+        self.assertEqual(provider.review.call_count, 1)
+        with SQLiteStorage.open(self.database) as reopened:
+            saved = review.job(reopened, plan["run_id"])
+        diagnostic = saved["batches"][0]["error"]
+        self.assertEqual(diagnostic["details"]["response_format"], "other")
+        self.assertEqual(diagnostic["details"]["response_sha256"], hashlib.sha256(text.encode()).hexdigest())
+        self.assertNotIn(text, json.dumps(saved))
+        done = review.execute_plan(plan["run_id"], store=self.store, confirm=saved["retry"]["digest"],
+                                   resume=True, provider_factory=FakeReviewProvider)
+        previous = done["approval_history"][-1]["previous_attempts"][0]
+        self.assertEqual(previous["error"], saved["batches"][0]["error"])
+        self.assertEqual(previous["metadata"]["input_tokens"], 123)
+        self.assertEqual(previous["error"]["details"]["response_format"], "other")
+        self.assertEqual(done["status"], "completed")
+
     def test_changed_input_before_or_during_call_is_not_rebound(self):
         plan = self.plan()
         original = self.store.photo(self.ids[0])

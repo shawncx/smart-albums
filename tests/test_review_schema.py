@@ -1,4 +1,5 @@
 from copy import deepcopy
+import hashlib
 import json
 from pathlib import Path
 import sys
@@ -8,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "photography" / "sc
 from photography_lib.config import PhotographyError
 from photography_lib.review_schema import (
     DIMENSIONS, MAX_RESPONSE_BYTES, RESPONSE_SCHEMA, SCHEMA_VERSION, build_prompt,
-    overall_score, parse_response, review_profile, validate_payload, validate_profile,
+    overall_score, parse_response, response_diagnostics, review_profile, validate_payload, validate_profile,
 )
 
 
@@ -86,12 +87,46 @@ class ReviewSchemaTests(unittest.TestCase):
             with self.subTest(prefix=text[:50]), self.assertRaises(PhotographyError):
                 parse_response(text, ["image_1"])
 
-    def test_v2_contract_rejects_even_a_single_json_code_block(self):
+    def test_single_json_transport_wrapper_preserves_the_validated_payload(self):
         plain = json.dumps(response())
         fence = chr(96) * 3
-        for tag in ("json", "JSON", "", "python"):
-            with self.assertRaises(PhotographyError):
-                parse_response(fence + tag + "\n" + plain + "\n" + fence, ["image_1"])
+        expected = parse_response(plain, ["image_1"])
+        for tag in ("json", "JSON", ""):
+            for newline in ("\n", "\r\n"):
+                wrapped = " \t" + fence + tag + " \t" + newline + plain + newline + fence + "\r\n"
+                with self.subTest(tag=tag, newline=newline):
+                    self.assertEqual(parse_response(wrapped, ["image_1"]), expected)
+
+    def test_code_block_never_salvages_ambiguous_or_invalid_responses(self):
+        plain = json.dumps(response())
+        block = "```json\n" + plain + "\n```"
+        invalid_score = plain.replace('"score": 7', '"score": true')
+        for text in ("Here is " + block, block + "\nDone.", block + "\n" + block,
+                     "```python\n" + plain + "\n```", "```json\n" + plain,
+                     "```json\n" + block + "\n```", "```json\n" + plain[:-1] + "\n```",
+                     '```json\n{"results":[],"results":[]}\n```',
+                     "```json\n" + invalid_score + "\n```",
+                     "```json\n" + plain.replace('"score": 7', '"score": NaN') + "\n```",
+                     "```json\n" + plain.replace('"image_id": "image_1"', '"image_id": "other"') + "\n```",
+                     "```json\n" + plain + " " * (MAX_RESPONSE_BYTES - len(plain)) + "\n```"):
+            with self.subTest(prefix=text[:50]), self.assertRaises(PhotographyError):
+                parse_response(text, ["image_1"])
+
+    def test_format_diagnostics_are_content_free_and_attached_to_parse_errors(self):
+        text = "Private model commentary, not JSON."
+        expected = {"response_format": "other", "response_bytes": len(text.encode()),
+                    "response_sha256": hashlib.sha256(text.encode()).hexdigest()}
+        self.assertEqual(response_diagnostics(text), expected)
+        with self.assertRaises(PhotographyError) as failed:
+            parse_response(text, ["image_1"])
+        self.assertEqual(failed.exception.details, {**expected, "line": 1, "column": 1})
+        self.assertNotIn(text, json.dumps(failed.exception.to_dict()))
+        for value, kind in ((None, "non_text"), ("\ud800", "invalid_utf8"),
+                            ("x" * (MAX_RESPONSE_BYTES + 1), "oversized"),
+                            ("```json\n{}\n```", "json_code_block"),
+                            ("```\n{}\n```", "unlabeled_code_block")):
+            with self.subTest(kind=kind):
+                self.assertEqual(response_diagnostics(value)["response_format"], kind)
 
     def test_duplicate_missing_reordered_ids_and_late_invalid_item(self):
         for value in (response(("image_1", "image_1")), response(("image_1",)),

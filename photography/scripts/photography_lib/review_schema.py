@@ -17,6 +17,7 @@ SDK_VERSION, RUNTIME_VERSION, PROVIDER_ID = legacy.SDK_VERSION, legacy.RUNTIME_V
 MAX_RESPONSE_BYTES, TEXT_LIMIT, LIST_LIMIT = legacy.MAX_RESPONSE_BYTES, legacy.TEXT_LIMIT, legacy.LIST_LIMIT
 REVIEW_FIELDS = ("review_status", "description", "dimensions", "strengths", "improvements", "limitations")
 PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "photo-review-v2.txt"
+_JSON_BLOCK = re.compile(r"```(?P<tag>json)?[ \t]*\r?\n(?P<body>.*?)\r?\n```", re.IGNORECASE | re.DOTALL)
 
 _TEXT_SCHEMA = {"type": "string", "minLength": 1, "maxLength": TEXT_LIMIT, "pattern": r"\S"}
 _NUMBER_SCHEMA = {"type": "number", "minimum": 0, "maximum": 10, "multipleOf": 0.5}
@@ -129,16 +130,45 @@ def validate_payload(value):
     return deepcopy(value)
 
 
+def _response_body(text):
+    """Remove at most one complete transport wrapper, never extract or repair JSON."""
+    stripped = text.strip(" \t\r\n")
+    block = _JSON_BLOCK.fullmatch(stripped)
+    if block is not None:
+        return block["body"], "json_code_block" if block["tag"] else "unlabeled_code_block"
+    kind = ("empty" if not stripped else "object" if stripped.startswith("{") else
+            "array" if stripped.startswith("[") else "code_fence" if stripped.startswith("```") else "other")
+    return text, kind
+
+
+def response_diagnostics(text):
+    """Describe transport shape without retaining model text or image content."""
+    if not isinstance(text, str):
+        return {"response_format": "non_text"}
+    try:
+        data = text.encode("utf-8")
+    except UnicodeError:
+        return {"response_format": "invalid_utf8"}
+    return {
+        "response_format": _response_body(text)[1] if len(data) <= MAX_RESPONSE_BYTES else "oversized",
+        "response_bytes": len(data), "response_sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
 def strict_json(text):
+    diagnostics = response_diagnostics(text)
     try:
         if not isinstance(text, str) or len(text.encode("utf-8")) > MAX_RESPONSE_BYTES:
-            _invalid("Review response is missing or exceeds the size limit.")
-        return json.loads(text, object_pairs_hook=legacy._unique_object, parse_constant=legacy._nonfinite)
+            _invalid("Review response is missing or exceeds the size limit.", details=diagnostics)
+        body, _ = _response_body(text)
+        return json.loads(body, object_pairs_hook=legacy._unique_object, parse_constant=legacy._nonfinite)
     except json.JSONDecodeError as exc:
-        _invalid("Expected one strict JSON object; Markdown fences and surrounding prose are not accepted.",
-                 details={"line": exc.lineno, "column": exc.colno})
+        _invalid("Expected one JSON object, optionally inside a single JSON or unlabeled code block; "
+                 "surrounding prose and malformed JSON are not accepted.",
+                 details={**diagnostics, "line": exc.lineno, "column": exc.colno})
     except (ValueError, UnicodeError, RecursionError):
-        _invalid("Expected one strict JSON object without duplicate keys or non-finite numbers.")
+        _invalid("Expected one strict JSON object without duplicate keys or non-finite numbers.",
+                 details=diagnostics)
 
 
 def _image_ids(ids):
@@ -154,6 +184,15 @@ def _image_ids(ids):
 
 def parse_response(text, expected_ids):
     _image_ids(expected_ids)
+    try:
+        return _parse_response(text, expected_ids)
+    except PhotographyError as exc:
+        if exc.code == "REVIEW_RESPONSE_INVALID":
+            exc.details = {**response_diagnostics(text), **(exc.details or {})}
+        raise
+
+
+def _parse_response(text, expected_ids):
     envelope = strict_json(text)
     _keys(envelope, ("results",))
     reviews = envelope["results"]

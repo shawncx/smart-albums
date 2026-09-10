@@ -103,3 +103,58 @@ If an attachment is missing, unreadable, or ambiguously mapped, do not guess. Re
 All natural-language string values must be in output_language. Keep JSON keys, image_id values, and enumerated values unchanged. Write concise, image-specific comments rather than repeating the same observation across sections.
 
 Do not return an overall score, rank, selection recommendation, confidence number, inferred metadata, or any additional fields. No Markdown fences, headings, commentary, or prose outside the JSON object.
+
+JSON SERIALIZATION
+
+Treat serialization as a separate final check after forming your photographic judgments. Emit a complete JSON document, not a sketch of its structure.
+
+- Use readable multiline JSON with one property per line. Keep each result's keys in this order: image_id, review_status, description, dimensions, strengths, improvements, limitations.
+- Use double quotes for every key and string. Escape any double quote or backslash inside a string. Put commas between members, never after the last member. Do not use comments, ellipses, or unfinished placeholders.
+- Close the dimensions object after its six dimension objects, BEFORE starting strengths. Close every improvement object before its containing improvements array.
+- Close each result object BEFORE closing the outer results array. With limitations as the final field, the final four closing delimiters are ] } ] }: limitations array, result object, results array, root object. Whitespace between these delimiters is fine. Do not omit the result object's closing brace.
+- Before submitting, silently check that every opening brace/bracket has its correctly nested closing partner, that all six dimensions and all required result fields are present, and that the number and order of results match the manifest. Do not print this check or a second version.
+
+The example below demonstrates COMPLETE JSON syntax for one unreadable attachment only. It is not a review of any supplied image, a default score, or wording to copy. Readable photos require their own evidence-based scores and comments; use the request's real image IDs and output language. For more than one image, repeat the entire result object inside results with a comma between objects.
+
+SYNTAX EXAMPLE (unreadable attachment only)
+{
+  "results": [
+    {
+      "image_id": "example_image",
+      "review_status": "unreviewable",
+      "description": "The example attachment is unreadable.",
+      "dimensions": {
+        "composition": {
+          "score": null,
+          "reason": "No interpretable visual evidence is available."
+        },
+        "lighting": {
+          "score": null,
+          "reason": "No interpretable visual evidence is available."
+        },
+        "color": {
+          "score": null,
+          "reason": "No interpretable visual evidence is available."
+        },
+        "subject": {
+          "score": null,
+          "reason": "No interpretable visual evidence is available."
+        },
+        "storytelling": {
+          "score": null,
+          "reason": "No interpretable visual evidence is available."
+        },
+        "technical": {
+          "score": null,
+          "reason": "No interpretable visual evidence is available."
+        }
+      },
+      "strengths": [],
+      "improvements": [],
+      "limitations": [
+        "The example attachment is unreadable. Downsampled JPEG previews cannot reliably establish original focus accuracy, original noise levels, compression artifacts versus preview-generation artifacts, or fine detail."
+      ]
+    }
+  ]
+}
+END SYNTAX EXAMPLE

@@ -33,6 +33,8 @@ _IMAGE_ID = re.compile(r"[A-Za-z0-9_-]{1,80}\Z")
 _LOGIN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,38}\Z")
 _TOKEN_FIELDS = ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens",
                  "reasoning_tokens")
+_FINISH_REASONS = frozenset({"stop", "end_turn", "stop_sequence", "length", "max_tokens",
+                           "tool_calls", "tool_use", "function_call", "content_filter"})
 # Preserve ordinary credential-home locations, but not token, BYOK, runtime,
 # instruction, Node preload, or telemetry overrides from the invoking shell.
 _CHILD_ENV_KEYS = frozenset({
@@ -81,6 +83,12 @@ class _UsageTotals:
             value = data.copilot_usage.total_nano_aiu
             if _nonnegative_number(value):
                 observed["credits"] = value
+        reason = getattr(data, "finish_reason", None)
+        if reason is not None:
+            observed["finish_reason"] = reason if isinstance(reason, str) and reason in _FINISH_REASONS else "other"
+        limit = getattr(data, "max_output_tokens", None)
+        if _positive_int(limit):
+            observed["max_output_tokens"] = limit
         self._calls.append(observed)
 
     def metadata(self) -> dict:
@@ -95,6 +103,20 @@ class _UsageTotals:
             # Preserve the API's unit. Neither the premium multiplier `cost`
             # nor nano-AIU is silently converted to Azure credit or currency.
             result["credits_unit"] = "copilot_nano_aiu"
+        return result
+
+    def response_diagnostics(self) -> dict:
+        reasons = [call["finish_reason"] for call in self._calls if "finish_reason" in call]
+        result = {}
+        result["response_finish_reason_calls"] = len(reasons)
+        result["response_usage_calls"] = len(self._calls)
+        result["response_output_limit_calls"] = sum(reason in ("length", "max_tokens") for reason in reasons)
+        result["response_finish_reason"] = (
+            "unavailable" if len(reasons) != len(self._calls) or not reasons
+            else reasons[0] if len(set(reasons)) == 1 else "mixed")
+        limits = [call["max_output_tokens"] for call in self._calls if "max_output_tokens" in call]
+        if limits and len(limits) == len(self._calls) and len(set(limits)) == 1:
+            result["response_max_output_tokens"] = limits[0]
         return result
 
 
@@ -365,6 +387,7 @@ class CopilotReviewProvider:
         reply_ready = asyncio.Event()
         reply_text = None
         accepting_reply = False
+        response_diagnostics = {"response_message_events": 0, "response_idle_observed": False}
 
         async def cleanup_step(name, operation):
             try:
@@ -409,9 +432,15 @@ class CopilotReviewProvider:
                     reported_models.append(data.model)
                     usage.record(event)
                 elif accepting_reply and isinstance(data, sdk.AssistantMessageData):
+                    response_diagnostics["response_message_events"] += 1
+                    chunk_count = getattr(data, "chunk_count", None)
+                    if _positive_int(chunk_count):
+                        response_diagnostics["response_max_chunk_count"] = max(
+                            chunk_count, response_diagnostics.get("response_max_chunk_count", 0))
                     reply_text = data.content
                 elif (accepting_reply and isinstance(data, sdk.SessionIdleData)
                       and data.mode != sdk.SessionMode.AUTOPILOT):
+                    response_diagnostics["response_idle_observed"] = True
                     reply_ready.set()
 
             async with asyncio.timeout(self.timeout_seconds):
@@ -531,10 +560,11 @@ class CopilotReviewProvider:
                 primary.details = {**(primary.details or {}), **details}
         if primary is not None:
             primary.details = {**(primary.details or {}), "usage": usage.metadata(),
+                               "provider_response": {**usage.response_diagnostics(), **response_diagnostics},
                                "elapsed_seconds": perf_counter() - started}
             raise primary from None
         if isinstance(result, ReviewReply):
             return ReviewReply(result.text, {
                 **result.metadata, **usage.metadata(), "elapsed_seconds": perf_counter() - started,
-            })
+            }, diagnostics={**usage.response_diagnostics(), **response_diagnostics})
         return result

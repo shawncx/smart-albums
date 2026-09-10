@@ -211,7 +211,10 @@ class ReviewExecutionTests(ReviewFixture):
     def test_failed_response_diagnostics_and_usage_survive_an_approved_retry(self):
         text = "Private model text instead of JSON."
         provider = Mock()
-        provider.review.return_value = SimpleNamespace(text=text, metadata={"input_tokens": 123, "output_tokens": 45})
+        diagnostics = {"response_finish_reason": "stop", "response_max_output_tokens": 4096,
+                       "response_message_events": 1, "response_idle_observed": True}
+        provider.review.return_value = SimpleNamespace(
+            text=text, metadata={"input_tokens": 123, "output_tokens": 45}, diagnostics=diagnostics)
         plan = self.plan(self.ids[:5], max_concurrency=1)
         failed = self.execute(plan, provider)
         self.assertEqual(failed["status"], "failed")
@@ -221,6 +224,11 @@ class ReviewExecutionTests(ReviewFixture):
         diagnostic = saved["batches"][0]["error"]
         self.assertEqual(diagnostic["details"]["response_format"], "other")
         self.assertEqual(diagnostic["details"]["response_sha256"], hashlib.sha256(text.encode()).hexdigest())
+        self.assertEqual(diagnostic["details"]["json_error_code"], "expected_value")
+        self.assertEqual(diagnostic["details"]["json_body_chars"], len(text))
+        self.assertEqual(diagnostic["details"]["json_error_offset"], 0)
+        self.assertEqual(diagnostic["details"]["provider_response"], diagnostics)
+        self.assertNotIn("response_finish_reason", saved["batches"][0]["metadata"])
         self.assertNotIn(text, json.dumps(saved))
         done = review.execute_plan(plan["run_id"], store=self.store, confirm=saved["retry"]["digest"],
                                    resume=True, provider_factory=FakeReviewProvider)
@@ -228,6 +236,7 @@ class ReviewExecutionTests(ReviewFixture):
         self.assertEqual(previous["error"], saved["batches"][0]["error"])
         self.assertEqual(previous["metadata"]["input_tokens"], 123)
         self.assertEqual(previous["error"]["details"]["response_format"], "other")
+        self.assertEqual(previous["error"]["details"]["provider_response"], diagnostics)
         self.assertEqual(done["status"], "completed")
 
     def test_changed_input_before_or_during_call_is_not_rebound(self):

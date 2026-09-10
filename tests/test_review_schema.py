@@ -115,11 +115,16 @@ class ReviewSchemaTests(unittest.TestCase):
     def test_format_diagnostics_are_content_free_and_attached_to_parse_errors(self):
         text = "Private model commentary, not JSON."
         expected = {"response_format": "other", "response_bytes": len(text.encode()),
+                    "response_chars": len(text),
                     "response_sha256": hashlib.sha256(text.encode()).hexdigest()}
         self.assertEqual(response_diagnostics(text), expected)
         with self.assertRaises(PhotographyError) as failed:
             parse_response(text, ["image_1"])
-        self.assertEqual(failed.exception.details, {**expected, "line": 1, "column": 1})
+        self.assertEqual(failed.exception.details, {
+            **expected, "line": 1, "column": 1, "json_error_code": "expected_value",
+            "json_error_offset": 0, "json_error_character": "other", "json_error_at_end": False,
+            "json_body_chars": len(text), "json_remaining_chars": len(text),
+        })
         self.assertNotIn(text, json.dumps(failed.exception.to_dict()))
         for value, kind in ((None, "non_text"), ("\ud800", "invalid_utf8"),
                             ("x" * (MAX_RESPONSE_BYTES + 1), "oversized"),
@@ -127,6 +132,61 @@ class ReviewSchemaTests(unittest.TestCase):
                             ("```\n{}\n```", "unlabeled_code_block")):
             with self.subTest(kind=kind):
                 self.assertEqual(response_diagnostics(value)["response_format"], kind)
+
+    def test_syntax_diagnostics_distinguish_errors_without_retaining_text(self):
+        cases = (
+            ('{"private":"PRIVATE_VALUE"', "expected_comma", "end_of_input", True),
+            ('{"private":"PRIVATE_VALUE" "next":1}', "expected_comma", "quote", False),
+            ('{"private" "PRIVATE_VALUE"}', "expected_colon", "quote", False),
+            ('{"private":"PRIVATE_VALUE}', "unterminated_string", "quote", False),
+            ('{"private":"PRIVATE_VALUE\\q"}', "invalid_escape", "backslash", False),
+            ('{"private":"PRIVATE_VALUE"} {"other":1}', "extra_data", "object_start", False),
+        )
+        for text, code, character, at_end in cases:
+            for wrapper in ("{}", "```json\n{}\n```"):
+                with self.subTest(code=code, wrapper=wrapper), self.assertRaises(PhotographyError) as failed:
+                    parse_response(wrapper.format(text), ["image_1"])
+                details = failed.exception.details
+                self.assertEqual(details["json_error_code"], code)
+                self.assertEqual(details["json_error_character"], character)
+                self.assertIs(details["json_error_at_end"], at_end)
+                self.assertEqual(details["json_body_chars"], len(text))
+                self.assertEqual(details["json_remaining_chars"], len(text) - details["json_error_offset"])
+                self.assertNotIn("PRIVATE_VALUE", json.dumps(failed.exception.to_dict()))
+                self.assertNotIn("private", json.dumps(details))
+
+    def test_syntax_offsets_count_characters_not_utf8_bytes(self):
+        text = '{"private":"\u96ea\u5c71"'
+        with self.assertRaises(PhotographyError) as failed:
+            parse_response(text, ["image_1"])
+        details = failed.exception.details
+        self.assertEqual(details["response_chars"], len(text))
+        self.assertEqual(details["response_bytes"], len(text.encode("utf-8")))
+        self.assertEqual(details["json_error_offset"], len(text))
+        self.assertTrue(details["json_error_at_end"])
+
+    def test_missing_result_closing_brace_is_diagnosed_not_repaired(self):
+        valid = json.dumps(response(), separators=(",", ":"))
+        self.assertTrue(valid.endswith("}}]}"))
+        text = valid[:-3] + valid[-2:]
+        with self.assertRaises(PhotographyError) as failed:
+            parse_response(text, ["image_1"])
+        details = failed.exception.details
+        self.assertEqual(details["json_error_code"], "expected_comma")
+        self.assertEqual(details["json_error_character"], "array_end")
+        self.assertEqual(details["json_remaining_chars"], 2)
+        self.assertFalse(details["json_error_at_end"])
+
+    def test_prompt_syntax_example_is_complete_and_not_a_numeric_score_default(self):
+        profile = review_profile("vision-test")
+        example = profile["prompt_text"].split("SYNTAX EXAMPLE (unreadable attachment only)\n", 1)[1]
+        example = example.split("\nEND SYNTAX EXAMPLE", 1)[0]
+        payload = parse_response(example, ["example_image"])["example_image"]
+        self.assertEqual(payload["review_status"], "unreviewable")
+        self.assertIsNone(payload["overall_score"])
+        self.assertEqual(set(payload["dimensions"]), set(DIMENSIONS))
+        self.assertIn("Do not omit the result object's closing brace.", profile["prompt_text"])
+        self.assertIn("Readable photos require their own evidence-based scores", profile["prompt_text"])
 
     def test_duplicate_missing_reordered_ids_and_late_invalid_item(self):
         for value in (response(("image_1", "image_1")), response(("image_1",)),

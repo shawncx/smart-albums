@@ -1,7 +1,7 @@
 """Synchronous, SDK-independent boundary for explicitly approved review requests."""
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Protocol
 
 
@@ -24,6 +24,7 @@ class ReviewRequest:
 class ReviewReply:
     text: str
     metadata: dict
+    diagnostics: dict = field(default_factory=dict)
 
 
 class ReviewProvider(Protocol):

@@ -71,8 +71,9 @@ class FakeErrorData:
 
 
 class FakeMessageData:
-    def __init__(self, content):
+    def __init__(self, content, *, chunk_count=None):
         self.content = content
+        self.chunk_count = chunk_count
 
 
 class FakeIdleData:
@@ -433,6 +434,41 @@ assert 'copilot' not in sys.modules
         for key in (*adapter._TOKEN_FIELDS, "credits", "credits_unit"):
             self.assertNotIn(key, metadata)
 
+    def test_response_completion_diagnostics_are_content_free_and_separate_from_usage(self):
+        self.harness.usage_events = [SimpleNamespace(id=uuid4(), data=FakeUsageData(
+            finish_reason="length", max_output_tokens=4096))]
+        self.harness.other_events = [SimpleNamespace(data=FakeMessageData("PRIVATE_TEXT", chunk_count=2))]
+        reply = self.provider.review(request())
+        metadata = reply.diagnostics
+        self.assertEqual(metadata["response_finish_reason"], "length")
+        self.assertEqual(metadata["response_finish_reason_calls"], 1)
+        self.assertEqual(metadata["response_usage_calls"], 1)
+        self.assertEqual(metadata["response_output_limit_calls"], 1)
+        self.assertEqual(metadata["response_max_output_tokens"], 4096)
+        self.assertEqual(metadata["response_message_events"], 2)
+        self.assertEqual(metadata["response_max_chunk_count"], 2)
+        self.assertTrue(metadata["response_idle_observed"])
+        self.assertNotIn("PRIVATE_TEXT", json.dumps(metadata))
+        self.assertNotIn("response_finish_reason", reply.metadata)
+
+    def test_unknown_missing_and_mixed_completion_reasons_are_not_claimed_as_normal_stops(self):
+        for reasons, expected in (
+            ([], "unavailable"), ([None], "unavailable"), (["stop", None], "unavailable"),
+            (["stop", "length"], "mixed"), (["PRIVATE_PROVIDER_TEXT"], "other"),
+        ):
+            self.harness.usage_events = [SimpleNamespace(id=uuid4(), data=FakeUsageData(
+                finish_reason=reason, max_output_tokens=None)) for reason in reasons]
+            with self.subTest(reasons=reasons):
+                metadata = self.provider.review(request()).diagnostics
+                self.assertEqual(metadata["response_finish_reason"], expected)
+                self.assertNotIn("response_max_output_tokens", metadata)
+                self.assertNotIn("PRIVATE_PROVIDER_TEXT", json.dumps(metadata))
+        self.harness.usage_events = [
+            SimpleNamespace(id=uuid4(), data=FakeUsageData(finish_reason="stop", max_output_tokens=4096)),
+            SimpleNamespace(id=uuid4(), data=FakeUsageData(finish_reason="stop", max_output_tokens=8192)),
+        ]
+        self.assertNotIn("response_max_output_tokens", self.provider.review(request()).diagnostics)
+
     def test_usage_rejects_invalid_numeric_metrics_and_preserves_explicit_zero(self):
         for value in (-1, True, float("nan"), float("inf"), "100"):
             self.harness.usage_events = [SimpleNamespace(id=uuid4(), data=FakeUsageData(
@@ -686,6 +722,7 @@ class InstalledSdkContractTests(unittest.TestCase):
             "model": "vision-model", "inputTokens": 123, "outputTokens": 45,
             "cacheReadTokens": 0, "cacheWriteTokens": 4, "reasoningTokens": 5,
             "cost": 3.0, "copilotUsage": {"totalNanoAiu": 1250000000.0},
+            "finishReason": "stop", "maxOutputTokens": 4096,
         })
         totals = adapter._UsageTotals()
         totals.record(SimpleNamespace(id=uuid4(), data=data))
@@ -693,6 +730,10 @@ class InstalledSdkContractTests(unittest.TestCase):
             "usage_source": "assistant.usage:per_call_sum", "input_tokens": 123,
             "output_tokens": 45, "cache_read_tokens": 0, "cache_write_tokens": 4,
             "reasoning_tokens": 5, "credits": 1250000000.0, "credits_unit": "copilot_nano_aiu",
+        })
+        self.assertEqual(totals.response_diagnostics(), {
+            "response_finish_reason": "stop", "response_finish_reason_calls": 1,
+            "response_usage_calls": 1, "response_output_limit_calls": 0, "response_max_output_tokens": 4096,
         })
 
     def test_installed_sdk_imports_and_type_construction_do_not_download(self):

@@ -297,8 +297,10 @@ def _execute_batches(plan, saved, store, provider_factory, started, previous_ela
         interrupted = interrupted or stopped
         return error, stopped
 
-    def fail_batch(batch, exc, metadata, batch_started):
+    def fail_batch(batch, exc, metadata, batch_started, diagnostics=None):
         error, stopped = remember_error(exc)
+        if diagnostics:
+            error["details"] = {**error.get("details", {}), "provider_response": diagnostics}
         if isinstance(exc, PhotographyError) and isinstance(exc.details, dict):
             usage = exc.details.get("usage")
             if isinstance(usage, dict):
@@ -315,9 +317,11 @@ def _execute_batches(plan, saved, store, provider_factory, started, previous_ela
     def finish_batch(future):
         batch, images, batch_started = in_flight.pop(future)
         metadata = {}
+        diagnostics = {}
         try:
             reply = future.result()
             metadata = {**reply.metadata, "elapsed_seconds": time.perf_counter() - batch_started}
+            diagnostics = getattr(reply, "diagnostics", {})
             payloads = parse_response(reply.text, [image.image_id for image in images])
             with store.transaction():
                 _verify_inputs(plan, store)
@@ -329,7 +333,7 @@ def _execute_batches(plan, saved, store, provider_factory, started, previous_ela
                 store.update_review_run(run_id, revision=run["revision"] + 1,
                                         elapsed_seconds=previous_elapsed + time.perf_counter() - started)
         except (Exception, KeyboardInterrupt) as exc:
-            fail_batch(batch, exc, metadata, batch_started)
+            fail_batch(batch, exc, metadata, batch_started, diagnostics)
 
     with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="photo-review") as executor:
         while in_flight or (first_error is None and next_batch < len(pending)):

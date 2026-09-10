@@ -18,6 +18,19 @@ MAX_RESPONSE_BYTES, TEXT_LIMIT, LIST_LIMIT = legacy.MAX_RESPONSE_BYTES, legacy.T
 REVIEW_FIELDS = ("review_status", "description", "dimensions", "strengths", "improvements", "limitations")
 PROMPT_PATH = Path(__file__).resolve().parents[2] / "prompts" / "photo-review-v2.txt"
 _JSON_BLOCK = re.compile(r"```(?P<tag>json)?[ \t]*\r?\n(?P<body>.*?)\r?\n```", re.IGNORECASE | re.DOTALL)
+_JSON_ERROR_CODES = {
+    "Expecting value": "expected_value",
+    "Expecting property name enclosed in double quotes": "expected_property_name",
+    "Expecting ':' delimiter": "expected_colon",
+    "Expecting ',' delimiter": "expected_comma",
+    "Extra data": "extra_data",
+    "Unterminated string starting at": "unterminated_string",
+    "Invalid control character at": "invalid_control_character",
+    "Invalid \\escape": "invalid_escape",
+    "Invalid \\uXXXX escape": "invalid_unicode_escape",
+    "Illegal trailing comma before end of object": "trailing_object_comma",
+    "Illegal trailing comma before end of array": "trailing_array_comma",
+}
 
 _TEXT_SCHEMA = {"type": "string", "minLength": 1, "maxLength": TEXT_LIMIT, "pattern": r"\S"}
 _NUMBER_SCHEMA = {"type": "number", "minimum": 0, "maximum": 10, "multipleOf": 0.5}
@@ -151,7 +164,26 @@ def response_diagnostics(text):
         return {"response_format": "invalid_utf8"}
     return {
         "response_format": _response_body(text)[1] if len(data) <= MAX_RESPONSE_BYTES else "oversized",
-        "response_bytes": len(data), "response_sha256": hashlib.sha256(data).hexdigest(),
+        "response_bytes": len(data), "response_chars": len(text),
+        "response_sha256": hashlib.sha256(data).hexdigest(),
+    }
+
+
+def _json_error_diagnostics(error):
+    body, offset = error.doc, error.pos
+    character = body[offset:offset + 1]
+    kinds = {'"': "quote", "\\": "backslash", "{": "object_start", "}": "object_end",
+             "[": "array_start", "]": "array_end", ",": "comma", ":": "colon"}
+    character_kind = ("end_of_input" if not character else
+                      kinds.get(character, "whitespace" if character.isspace() else "other"))
+    return {
+        "json_error_code": _JSON_ERROR_CODES.get(error.msg, "invalid_json"),
+        "json_error_offset": offset,
+        "json_error_character": character_kind,
+        "json_error_at_end": not body[offset:].strip(),
+        "json_body_chars": len(body),
+        "json_remaining_chars": len(body) - offset,
+        "line": error.lineno, "column": error.colno,
     }
 
 
@@ -165,7 +197,7 @@ def strict_json(text):
     except json.JSONDecodeError as exc:
         _invalid("Expected one JSON object, optionally inside a single JSON or unlabeled code block; "
                  "surrounding prose and malformed JSON are not accepted.",
-                 details={**diagnostics, "line": exc.lineno, "column": exc.colno})
+                 details={**diagnostics, **_json_error_diagnostics(exc)})
     except (ValueError, UnicodeError, RecursionError):
         _invalid("Expected one strict JSON object without duplicate keys or non-finite numbers.",
                  details=diagnostics)

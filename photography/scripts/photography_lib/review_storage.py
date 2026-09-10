@@ -418,11 +418,12 @@ class ReviewStorage:
         expected = {"version", "run_id", "album_id", "created_at", "profile", "profile_id",
                     "batch_size", "force", "items", "batches", "counts", "max_image_bytes", "disclosure", "digest"}
         selection_fields = {"selection_count", "duplicates_removed"}
-        _require(type(plan) is dict and set(plan) in (expected, expected | selection_fields),
+        _require(type(plan) is dict and set(plan) - {"max_concurrency"} in (expected, expected | selection_fields),
                  "Invalid review plan fields.")
         _require(plan["version"] == "ai-review-plan-v1" and _text(plan["run_id"])
                  and plan["album_id"] == self.album()["id"] and _text(plan["created_at"])
                  and _integer(plan["batch_size"], 1) and _integer(plan["max_image_bytes"])
+                 and _integer(plan.get("max_concurrency", 1), 1)
                  and type(plan["force"]) is bool and isinstance(plan["disclosure"], (str, dict, list))
                  and bool(plan["disclosure"]), "Invalid review plan identity or limits.")
         try:

@@ -18,6 +18,8 @@ def add_commands(commands):
     selection.add_argument("--ids-file", help="Absolute UTF-8 JSON array of existing photo IDs.")
     plan.add_argument("--model", required=True, help="Explicit Copilot vision model ID, not auto.")
     plan.add_argument("--batch-size", type=int, default=4)
+    plan.add_argument("--max-concurrency", type=int, default=5,
+                      help="Maximum simultaneous review requests (default: 5); use 1 for serial execution.")
     plan.add_argument("--language", choices=("zh-CN", "en"), default="zh-CN")
     plan.add_argument("--force", action="store_true", help="Request a fresh review and preserve history.")
     plan.add_argument("--dry-run", action="store_true")
@@ -69,7 +71,8 @@ def command(args, store, config):
         else:
             ids = [args.photo_id]
         return review.create_plan(ids, store=store, model=args.model, language=args.language,
-                                  batch_size=args.batch_size, force=args.force, persist=not args.dry_run)
+                                  batch_size=args.batch_size, max_concurrency=args.max_concurrency,
+                                  force=args.force, persist=not args.dry_run)
     if action == "job":
         return review.job(store, args.run_id)
     if action == "result":

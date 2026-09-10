@@ -27,6 +27,8 @@ class ReviewReply:
 
 
 class ReviewProvider(Protocol):
+    """One instance can receive concurrent review calls; requests share no session."""
+
     def review(self, request: ReviewRequest) -> ReviewReply: ...
 
     def models(self) -> list[dict]: ...

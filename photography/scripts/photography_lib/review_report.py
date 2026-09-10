@@ -165,6 +165,7 @@ def review_report(run_id, output, *, store, config):
                 "run_id": run_id, "album_id": saved["album_id"], "created_at": saved["created_at"],
                 "profile_id": saved["profile_id"], "rubric_version": saved["profile"]["rubric_version"],
                 "batch_size": saved["batch_size"], "request_attempts": saved["request_attempts"],
+                "max_concurrency": saved.get("max_concurrency", 1),
                 "digest": saved["digest"], "summary": saved["summary"],
             }, ensure_ascii=False, indent=2)) + "</pre></details></header>"
         )

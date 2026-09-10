@@ -66,7 +66,7 @@ class ReviewV2Tests(ReviewFixture):
                     value["results"][-1]["overall_score"] = 7
                 else:
                     value["results"][-1]["improvements"] = ["Crop."]
-            plan = self.plan(self.ids[:5], force=True)
+            plan = self.plan(self.ids[:5], force=True, max_concurrency=1)
             provider = FakeReviewProvider(invalid)
             failed = self.execute(plan, provider)
             with self.subTest(mode=mode):

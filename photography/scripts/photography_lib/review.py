@@ -1,9 +1,9 @@
 """Explicit, confirmed review of frozen saved previews; never original files."""
 from __future__ import annotations
 
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from copy import deepcopy
 from datetime import datetime, timezone
-import sqlite3
 import time
 from uuid import uuid4
 
@@ -57,12 +57,15 @@ def _input(photo_id, store, *, pixels=False):
     return manifest, data
 
 
-def create_plan(ids, *, store, model, language="zh-CN", batch_size=4, force=False, persist=True):
+def create_plan(ids, *, store, model, language="zh-CN", batch_size=4, max_concurrency=5,
+                force=False, persist=True):
     if (not isinstance(ids, (list, tuple)) or not ids
             or any(not isinstance(key, str) or not key.strip() for key in ids)):
         raise PhotographyError("INVALID_ARGUMENT", "Select a nonempty array of existing photo IDs.")
     if type(batch_size) is not int or batch_size < 1:
         raise PhotographyError("INVALID_ARGUMENT", "Review batch size must be a positive integer.")
+    if type(max_concurrency) is not int or max_concurrency < 1:
+        raise PhotographyError("INVALID_ARGUMENT", "Review concurrency must be a positive integer.")
     if type(force) is not bool:
         raise PhotographyError("INVALID_ARGUMENT", "Fresh-review selection must be a boolean.")
     profile = review_profile(model, language)
@@ -86,7 +89,7 @@ def create_plan(ids, *, store, model, language="zh-CN", batch_size=4, force=Fals
     plan = {
         "version": PLAN_VERSION, "run_id": "review_" + uuid4().hex, "album_id": album_id,
         "created_at": _now(), "profile": profile, "profile_id": profile_id,
-        "batch_size": batch_size, "force": force, "selection_count": len(ids),
+        "batch_size": batch_size, "max_concurrency": max_concurrency, "force": force, "selection_count": len(ids),
         "duplicates_removed": len(ids) - len(items), "items": items, "batches": batches,
         "counts": {"total": len(items), "cached": len(items) - len(pending),
                    "pending": len(pending), "batches": len(batches)},
@@ -111,6 +114,7 @@ def _validate_run(run, batches, store):
                 or plan["digest"] != run["digest"] or _digest(plan) != run["digest"]
                 or fingerprint(plan["profile"]) != plan["profile_id"]
                 or type(plan["batch_size"]) is not int or plan["batch_size"] < 1
+                or type(plan.get("max_concurrency", 1)) is not int or plan.get("max_concurrency", 1) < 1
                 or type(plan["force"]) is not bool
                 or run["confirmed_digest"] not in (None, plan["digest"])):
             raise ValueError("Plan identity mismatch.")
@@ -259,75 +263,128 @@ def execute_plan(run_id, *, store, confirm=None, resume=False, confirm_stopped=F
             approvals = [*saved["approval_history"], approval]
             store.update_review_run(run_id, status="running", confirmed_digest=plan["digest"],
                                     revision=saved["revision"] + 1, approval_history=approvals)
-        provider = None
-        attempts = 0
-        provider_calls = 0
-        for batch in saved["batches"]:
-            if batch["status"] == "completed":
-                continue
-            batch_started = time.perf_counter()
-            metadata = {}
-            try:
-                from .review_provider import ReviewImage, ReviewRequest
-                with store.read_snapshot():
-                    _verify_inputs(plan, store)
-                    images = tuple(ReviewImage("image_" + str(index + 1),
-                                               _input(item["photo_id"], store, pixels=True)[1])
-                                   for index, item in enumerate(batch["items"]))
-                prompt = build_prompt(plan["profile"], [image.image_id for image in images])
-                with store.transaction():
-                    _verify_inputs(plan, store)
-                    run = store.review_run(run_id)
-                    store.update_review_batch(batch["batch_id"], status="running",
-                                              attempts=batch["attempts"] + 1, error=None)
-                    store.update_review_run(run_id, request_attempts=run["request_attempts"] + 1,
-                                            revision=run["revision"] + 1)
-                attempts += 1
-                if provider is None:
-                    provider = (provider_factory or _provider)()
-                provider_calls += 1
-                reply = provider.review(ReviewRequest(
-                    model=plan["profile"]["model"], prompt=prompt, images=images,
-                    batch_size=plan["batch_size"], max_image_bytes=plan["max_image_bytes"]))
-                metadata = {**reply.metadata, "elapsed_seconds": time.perf_counter() - batch_started}
-                payloads = parse_response(reply.text, [image.image_id for image in images])
-                with store.transaction():
-                    _verify_inputs(plan, store)
-                    for image, item in zip(images, batch["items"]):
-                        store.put_review_result(item["photo_id"], run_id, batch["batch_id"], plan["profile"],
-                                                item["input_manifest"], payloads[image.image_id], metadata)
-                    store.update_review_batch(batch["batch_id"], status="completed", error=None, metadata=metadata)
-                    run = store.review_run(run_id)
-                    store.update_review_run(run_id, revision=run["revision"] + 1,
-                                            elapsed_seconds=previous_elapsed + time.perf_counter() - started)
-            except (PhotographyError, sqlite3.Error, OSError, KeyboardInterrupt) as exc:
-                interrupted = isinstance(exc, KeyboardInterrupt) or (
-                    isinstance(exc, PhotographyError) and exc.code in ("REVIEW_INTERRUPTED", "REVIEW_CANCELLED", "INTERRUPTED"))
-                error = exc.to_dict() if isinstance(exc, PhotographyError) else {
-                    "code": "INTERRUPTED" if interrupted else "REVIEW_EXECUTION_FAILED",
-                    "message": "Review interrupted." if interrupted else "Review processing or storage failed.",
-                }
-                if isinstance(exc, PhotographyError) and isinstance(exc.details, dict):
-                    usage = exc.details.get("usage")
-                    if isinstance(usage, dict):
-                        metadata.update(usage)
-                with store.transaction():
-                    state = "interrupted" if interrupted else "stale" if error["code"] == "REVIEW_INPUT_CHANGED" else "failed"
-                    store.update_review_batch(batch["batch_id"], status=state, error=error,
-                                              metadata={**metadata, "elapsed_seconds": time.perf_counter() - batch_started})
-                    successes = plan["counts"]["cached"] + len(store.review_run_results(run_id))
-                    run = store.review_run(run_id)
-                    store.update_review_run(run_id, status="interrupted" if interrupted else "partial" if successes else "failed",
-                                            revision=run["revision"] + 1,
-                                            elapsed_seconds=previous_elapsed + time.perf_counter() - started)
-                return {**job(store, run_id), "error": error, "request_attempts_this_execution": attempts,
-                        "provider_calls_this_operation": provider_calls}
+        return _execute_batches(plan, saved, store, provider_factory, started, previous_elapsed)
+
+
+def _execute_batches(plan, saved, store, provider_factory, started, previous_elapsed):
+    """Keep SQLite on the caller thread; only provider I/O runs in the bounded pool.
+
+    Stop scheduling on the first observed failure, then settle every in-flight
+    batch before releasing the album lock or making its retry scope available.
+    Plans saved before concurrency was configurable retain serial execution.
+    """
+    from .review_provider import ReviewImage, ReviewRequest
+
+    run_id = plan["run_id"]
+    pending = [batch for batch in saved["batches"] if batch["status"] != "completed"]
+    concurrency = min(plan.get("max_concurrency", 1), len(pending) or 1)
+    provider = None
+    attempts = provider_calls = next_batch = 0
+    in_flight = {}
+    first_error = None
+    interrupted = False
+
+    def remember_error(exc):
+        nonlocal first_error, interrupted
+        stopped = isinstance(exc, KeyboardInterrupt) or (
+            isinstance(exc, PhotographyError) and exc.code in ("REVIEW_INTERRUPTED", "REVIEW_CANCELLED", "INTERRUPTED"))
+        error = exc.to_dict() if isinstance(exc, PhotographyError) else {
+            "code": "INTERRUPTED" if stopped else "REVIEW_EXECUTION_FAILED",
+            "message": "Review interrupted." if stopped else "Review processing or storage failed.",
+        }
+        if first_error is None:
+            first_error = error
+        interrupted = interrupted or stopped
+        return error, stopped
+
+    def fail_batch(batch, exc, metadata, batch_started):
+        error, stopped = remember_error(exc)
+        if isinstance(exc, PhotographyError) and isinstance(exc.details, dict):
+            usage = exc.details.get("usage")
+            if isinstance(usage, dict):
+                metadata.update(usage)
         with store.transaction():
+            state = "interrupted" if stopped else "stale" if error["code"] == "REVIEW_INPUT_CHANGED" else "failed"
+            store.update_review_batch(batch["batch_id"], status=state, error=error,
+                                      metadata={**metadata, "elapsed_seconds": time.perf_counter() - batch_started})
             run = store.review_run(run_id)
-            store.update_review_run(run_id, status="completed", revision=run["revision"] + 1,
+            # Keep the run writable while other submitted batches are settling.
+            store.update_review_run(run_id, revision=run["revision"] + 1,
                                     elapsed_seconds=previous_elapsed + time.perf_counter() - started)
-        return {**job(store, run_id), "request_attempts_this_execution": attempts,
-                "provider_calls_this_operation": provider_calls}
+
+    def finish_batch(future):
+        batch, images, batch_started = in_flight.pop(future)
+        metadata = {}
+        try:
+            reply = future.result()
+            metadata = {**reply.metadata, "elapsed_seconds": time.perf_counter() - batch_started}
+            payloads = parse_response(reply.text, [image.image_id for image in images])
+            with store.transaction():
+                _verify_inputs(plan, store)
+                for image, item in zip(images, batch["items"]):
+                    store.put_review_result(item["photo_id"], run_id, batch["batch_id"], plan["profile"],
+                                            item["input_manifest"], payloads[image.image_id], metadata)
+                store.update_review_batch(batch["batch_id"], status="completed", error=None, metadata=metadata)
+                run = store.review_run(run_id)
+                store.update_review_run(run_id, revision=run["revision"] + 1,
+                                        elapsed_seconds=previous_elapsed + time.perf_counter() - started)
+        except (Exception, KeyboardInterrupt) as exc:
+            fail_batch(batch, exc, metadata, batch_started)
+
+    with ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="photo-review") as executor:
+        while in_flight or (first_error is None and next_batch < len(pending)):
+            try:
+                # Consume every available result before refilling, including
+                # failures from later batches that finished ahead of earlier ones.
+                done = [future for future in in_flight if future.done()]
+                if done:
+                    for future in done:
+                        finish_batch(future)
+                    continue
+                if first_error is None and next_batch < len(pending) and len(in_flight) < concurrency:
+                    batch = pending[next_batch]
+                    next_batch += 1
+                    batch_started = time.perf_counter()
+                    try:
+                        with store.read_snapshot():
+                            _verify_inputs(plan, store)
+                            images = tuple(ReviewImage("image_" + str(index + 1),
+                                                       _input(item["photo_id"], store, pixels=True)[1])
+                                           for index, item in enumerate(batch["items"]))
+                        request = ReviewRequest(
+                            model=plan["profile"]["model"],
+                            prompt=build_prompt(plan["profile"], [image.image_id for image in images]),
+                            images=images, batch_size=plan["batch_size"], max_image_bytes=plan["max_image_bytes"])
+                        with store.transaction():
+                            _verify_inputs(plan, store)
+                            run = store.review_run(run_id)
+                            store.update_review_batch(batch["batch_id"], status="running",
+                                                      attempts=batch["attempts"] + 1, error=None)
+                            store.update_review_run(run_id, request_attempts=run["request_attempts"] + 1,
+                                                    revision=run["revision"] + 1)
+                        attempts += 1
+                        if provider is None:
+                            provider = (provider_factory or _provider)()
+                        future = executor.submit(provider.review, request)
+                        in_flight[future] = (batch, images, batch_started)
+                        provider_calls += 1
+                    except (Exception, KeyboardInterrupt) as exc:
+                        fail_batch(batch, exc, {}, batch_started)
+                elif in_flight:
+                    wait(in_flight, return_when=FIRST_COMPLETED)
+            except KeyboardInterrupt as exc:
+                # A caller interrupt stops new sends, but cannot retract cloud
+                # requests. Drain their results before exposing a retry digest.
+                remember_error(exc)
+
+    with store.transaction():
+        run = store.review_run(run_id)
+        successes = plan["counts"]["cached"] + len(store.review_run_results(run_id))
+        status = ("interrupted" if interrupted else "partial" if successes else "failed") if first_error else "completed"
+        store.update_review_run(run_id, status=status, revision=run["revision"] + 1,
+                                elapsed_seconds=previous_elapsed + time.perf_counter() - started)
+    return {**job(store, run_id), **({"error": first_error} if first_error else {}),
+            "request_attempts_this_execution": attempts, "provider_calls_this_operation": provider_calls}
 
 
 def _current_record(record, store):

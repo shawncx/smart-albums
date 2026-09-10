@@ -45,7 +45,7 @@ review rubric
 review upgrade --output <absolute-new.sqlite>
 review models --confirm-provider-access
 review plan --photo-id <photo-id> --model <model-id>
-review plan --ids-file <absolute-json-file> --model <model-id> [--batch-size 4] [--language zh-CN|en] [--force] [--dry-run]
+review plan --ids-file <absolute-json-file> --model <model-id> [--batch-size 4] [--max-concurrency 5] [--language zh-CN|en] [--force] [--dry-run]
 review execute <run-id> --confirm <digest>
 review job <run-id>
 review resume <run-id> --confirm <retry-digest> [--confirm-stopped]
@@ -70,6 +70,8 @@ Freeze album UUID, exact selection, preview identities/size, provider/model, SDK
 
 Default batch size is 4 with a smaller final batch: 1/4/5/9 uncached photos yield `[1]`, `[4]`, `[4,1]`, `[4,4,1]`. Only uncached/forced photos are batched; successful cached references remain part of the selected task. A fully cached task requires no provider/model discovery. `--dry-run` persists nothing; ordinary planning saves operational state only, never contacts Copilot.
 
+New plans default to at most **5 simultaneous requests**, each containing up to **4 photos**. `--max-concurrency N` sets a positive request limit; use `1` for serial execution. Freeze this limit in the plan/digest and retain it on resume. Plans created before this field existed remain serial. Fill available slots as requests complete; completion order need not match batch order, but photo/result mappings and saved batch ordinals remain frozen. Each request retains a fresh isolated Copilot client/session, with one shared, synchronized login identity check. The model's declared image limits still apply independently to every request.
+
 ### Confirm the whole frozen task before any SDK construction
 
 Present the album, exact photos, **cloud-transfer disclosure**, actual preview dimensions/bytes, chosen model, existing-login policy, rubric, language, cached/pending counts, batch count and digest in the user's language. Obtain explicit approval for the whole task **before SDK construction, authentication/model checks, session creation or image submission**. The digest binds data; it is not proof of consent by itself.
@@ -80,9 +82,9 @@ Validate the selected model's known vision/JPEG/image-count/size limits before t
 
 ### Commit atomically; stop and explicitly resume after failure
 
-Use one device writer and the crash-released local album execution lock. No network operation belongs inside a SQLite transaction. Recheck frozen input identities before transmission and before saving the complete batch; changed inputs need a new plan, not replacement uploads or a result attached to newer bytes.
+Use one device writer and the crash-released local album execution lock. Only provider calls run in worker threads; the calling thread owns all SQLite reads and writes. No network operation belongs inside a SQLite transaction. Recheck frozen input identities before transmission and before saving the complete batch; changed inputs need a new plan, not replacement uploads or a result attached to newer bytes.
 
-Validate the entire response before committing any result in a batch. On timeout, cancellation, rate limit, empty/invalid response, stale data or another failure, stop subsequent sends. Preserve earlier successful batches and pending work. No automatic retry, JSON-repair call or fallback is allowed. Report partial/failed state and sanitized errors instead of treating a run ID as completion.
+Validate the entire response before committing any result in a batch. On an observed timeout, cancellation, rate limit, empty/invalid response, stale data or another failure, stop scheduling new requests. Already submitted requests can still complete: wait for them and save each valid complete batch before releasing the album lock and exposing a retry scope. A caller interrupt also stops scheduling and drains submitted requests; it cannot retract cloud requests. Preserve successful batches and pending work. No automatic retry, JSON-repair call or fallback is allowed. Report partial/failed/interrupted state and sanitized errors instead of treating a run ID as completion. Total active execution time is elapsed wall time across attempts; overlapping batch times must not be summed as task duration.
 
 `review job` exposes attempts, unfinished batches and a retry digest bound to the original plan, current attempt/state revision, remaining scope and previous uncertain sends. Present that scope and the duplicate-charge warning, then obtain **fresh state-bound approval for every retry/resume**. The original execution digest and a consumed retry digest cannot authorize another attempt.
 

@@ -53,6 +53,7 @@
 ### AI Review 当前合同
 
 - 独立第四能力；CLI/安装说明见 [review](../photography/references/review.md)。仅用户明确选择已有 photo ID 和模型，严格校验保存的 JPEG 预览，不发原图、路径、EXIF 或相册身份。默认批次 4、允许尾批，逐图独立评价，不做组内排名。原有本地 ingestion/index/search 不变；v1 不新增 review 搜索入口，仅为未来查询保留结构化存储。
+- 新计划默认最多 5 个请求并行、每请求 4 张照片；`--max-concurrency N` 为正整数并冻结在计划/digest 中，恢复沿用，旧计划缺字段时保持串行。API 在线程池内执行，SQLite 仅主线程读写；失败或中断后停止派发，等待已提交请求结束并保存成功批次，再释放相册锁和生成重试范围。每请求仍独立 client/session，账号身份检查加锁；任务耗时为实际经过时间，不累加重叠批次耗时。
 - `review models --confirm-provider-access` 是独立批准的提供方联系；没有标志须 `CONFIRMATION_REQUIRED`，不得构造 SDK。认证/模型探测也算联系 Copilot。help/plan/rubric/job/result/history 无 SDK 构造；dry-run 不保存。整任务计划显示云传输、确切范围、模型/语言/输入大小、缓存及批次，实际批准后才可构造 SDK、认证、建 session 或上传；旧任务、代码批准和 models 批准不可替代。
 - `photo-review-v2` 严格 JSON：顶层只有 `results`，按 manifest 顺序映射；`dimensions` 六维分数为 0–10 的 0.5 步长或 null，`review_status` 必须与空评分一致。改进建议含 `kind/action/rationale/tradeoff`，允许空优点和建议数组；兼容单个完整的 JSON/无标签代码块包装，仍拒绝额外文字、多重/嵌套代码块和损坏 JSON。仅六维均有分数时本地计算两位 decimal half-up 等权平均，其他情况总分为 null。无效响应整批失败，不保存原始 review；错误记录新增不含正文的格式、字节数和摘要诊断，并随重试历史保留，无需修改数据库格式。输入/配置匹配才复用，force 新增历史；失败停止后续请求，resume 使用新 state-bound digest，不自动重试/修复 JSON/回退。
 - 整个 Skill 自包含 prompt 与可选 `requirements-review.txt`，固定 SDK 1.0.13 / runtime 1.0.83；安装和 runtime 下载均需明确授权。默认现有本地 Copilot 登录 `mode="copilot-cli"` / `use_logged_in_user=True`，不需独立 token、不复制凭据、不自动登录；只排除 child 环境覆盖，独立 owned working/session state 不移动 credential home。限制/清理不是 OS sandbox、无日志、无远端保留或精确计费保证。

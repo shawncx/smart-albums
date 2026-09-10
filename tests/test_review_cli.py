@@ -29,7 +29,21 @@ class ReviewCLITests(ReviewFixture):
         code, plan = self.cli("plan", "--photo-id", self.ids[0], "--model", "vision-test")
         self.assertEqual(code, 0)
         self.assertEqual(plan["counts"]["pending"], 1)
+        self.assertEqual((plan["max_concurrency"], plan["batch_size"]), (5, 4))
         self.assertEqual(plan["album"]["database_path"], str(self.database))
+
+    def test_configured_concurrency_is_frozen_and_invalid_limits_are_rejected(self):
+        code, plan = self.cli("plan", "--photo-id", self.ids[0], "--model", "vision-test",
+                              "--max-concurrency", "2", "--batch-size", "3")
+        self.assertEqual(code, 0)
+        self.assertEqual((plan["max_concurrency"], plan["batch_size"]), (2, 3))
+        self.assertEqual(self.cli("job", plan["run_id"])[1]["max_concurrency"], 2)
+        for value in ("0", "-1"):
+            with self.subTest(value=value):
+                code, result = self.cli("plan", "--photo-id", self.ids[0], "--model", "vision-test",
+                                        "--max-concurrency", value)
+                self.assertEqual(code, 2)
+                self.assertEqual(result["error"]["code"], "INVALID_ARGUMENT")
 
     def test_models_require_separate_approval_and_local_commands_never_construct_provider(self):
         factory = Mock(return_value=FakeReviewProvider())

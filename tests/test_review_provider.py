@@ -1,6 +1,7 @@
 """No live credentials, runtime process, downloads, or inference in these tests."""
 import asyncio
 import base64
+from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
 from dataclasses import FrozenInstanceError, replace
 from importlib.metadata import PackageNotFoundError, version
@@ -13,6 +14,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from threading import Barrier
 import traceback
 from types import SimpleNamespace
 import unittest
@@ -281,6 +283,27 @@ assert 'copilot' not in sys.modules
         workdirs = [client.kwargs["working_directory"] for client in self.harness.clients]
         self.assertEqual(len(set(workdirs)), 2)
         self.assertTrue(all(not Path(path).exists() for path in workdirs))
+
+    def test_concurrent_calls_keep_clients_sessions_and_state_isolated(self):
+        started = Barrier(5, timeout=10)
+        original_record = self.harness.record
+        def record(name):
+            original_record(name)
+            if name == "start":
+                started.wait()
+        with patch.object(self.harness, "record", side_effect=record), ThreadPoolExecutor(max_workers=5) as pool:
+            replies = list(pool.map(self.provider.review, [request(prompt=f"Review batch {i}") for i in range(5)]))
+        self.assertEqual(len(replies), 5)
+        self.assertTrue(all(reply.text == self.harness.raw_reply for reply in replies))
+        self.assertTrue(all(reply.metadata["request_attempts"] == 1 for reply in replies))
+        self.assertEqual(len(self.harness.clients), 5)
+        self.assertEqual(len({client.kwargs["working_directory"] for client in self.harness.clients}), 5)
+        self.assertEqual(len({session.session_id for session in self.harness.sessions}), 5)
+        self.assertEqual({session.sent["prompt"] for session in self.harness.sessions},
+                         {f"Review batch {i}" for i in range(5)})
+        self.assertEqual(self.harness.calls.count("auth"), 10)
+        self.assertEqual(self.harness.calls.count("stop"), 5)
+        self.assertEqual(list((self.root / "state").iterdir()), [])
 
     def test_models_authenticate_and_stop_without_creating_session(self):
         result = self.provider.models()

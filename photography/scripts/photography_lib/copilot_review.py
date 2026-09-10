@@ -19,6 +19,7 @@ from pathlib import Path
 import re
 import shutil
 import sys
+from threading import Lock
 from time import perf_counter
 from types import SimpleNamespace
 from uuid import uuid4
@@ -313,7 +314,7 @@ def _provider_diagnostics():
 
 
 class CopilotReviewProvider:
-    """A lazy synchronous facade; each operation owns a fresh client and session."""
+    """A concurrent synchronous facade; each call owns a fresh client and session."""
 
     def __init__(self, *, timeout_seconds: float = 180, cleanup_timeout_seconds: float = 15,
                  state_directory: Path | None = None, expected_login: str | None = None):
@@ -326,6 +327,7 @@ class CopilotReviewProvider:
         self.cleanup_timeout_seconds = cleanup_timeout_seconds
         self.state_directory = state_directory
         self._login = expected_login
+        self._auth_lock = Lock()
 
     def models(self) -> list[dict]:
         with _provider_diagnostics():
@@ -337,16 +339,17 @@ class CopilotReviewProvider:
             return asyncio.run(self._operation(request))
 
     def _check_auth(self, auth) -> None:
-        if (auth.isAuthenticated is not True or auth.authType != "user"
-                or auth.host != "https://github.com"
-                or not isinstance(auth.login, str) or not _LOGIN.fullmatch(auth.login)
-                or (self._login is not None and auth.login.casefold() != self._login.casefold())):
-            raise PhotographyError(
-                "REVIEW_AUTH_REQUIRED",
-                "Use the intended signed-in Copilot CLI account on github.com. "
-                "Environment tokens, gh fallback, unknown sources, and account changes are not accepted; sign in explicitly outside review.",
-            )
-        self._login = auth.login
+        with self._auth_lock:
+            if (auth.isAuthenticated is not True or auth.authType != "user"
+                    or auth.host != "https://github.com"
+                    or not isinstance(auth.login, str) or not _LOGIN.fullmatch(auth.login)
+                    or (self._login is not None and auth.login.casefold() != self._login.casefold())):
+                raise PhotographyError(
+                    "REVIEW_AUTH_REQUIRED",
+                    "Use the intended signed-in Copilot CLI account on github.com. "
+                    "Environment tokens, gh fallback, unknown sources, and account changes are not accepted; sign in explicitly outside review.",
+                )
+            self._login = auth.login
 
     async def _operation(self, request: ReviewRequest | None):
         started = perf_counter()
